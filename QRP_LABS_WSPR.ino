@@ -1,8 +1,10 @@
 
 // QRP_LABS_WSPR
 //   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module
+//   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
 
 #include <Wire.h>
+// #include <FreqCount.h>
 
 #define SI5351   0x60    // i2c address
 #define PLLA 26   // register address offsets for PLL's
@@ -10,23 +12,45 @@
 #define CLK0_EN   1
 #define CLK1_EN   2
 #define CLK2_EN   4
+#define FREQ  7038600   // starting freq
+#define DIV   14        // starting divider
+#define RDIV   2        // starting sub divider ( 13 meg breakpoint for div = 1 )
 
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // or self timed frame (stand alone mode)
 
   // use even dividers between 6 and 254 for lower jitter
   // freq range 2 to 150 without using the post dividers
+  // we are using the post dividers
   // vco 600 to 900
   
-uint64_t clock_freq = 2700368000;  // * 100 to enable setting fractional frequency
-uint32_t freq = 7038600;       // ssb vfo freq
+uint64_t clock_freq = 2700452200;// 2700465300;// * 100 to enable setting fractional frequency
+uint32_t freq = FREQ;       // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
-uint32_t divider = 14;        //  7 mhz with Rdiv of 8, 28 mhz with Rdiv of 2
+uint32_t divider = DIV;        //  7 mhz with Rdiv of 8, 28 mhz with Rdiv of 2
 uint32_t audio_freq = 1500;   // wspr 1400 to 1600 offset from base vfo freq 
-uint8_t  Rdiv = 2; 
+uint8_t  Rdiv = RDIV; 
 
 uint8_t  operate_mode = FRAME_MODE;   // start in stand alone timing mode
+uint8_t wspr_tx_enable;
+uint8_t cal_enable;
+
+//      Download WSPRcode.exe from  http://physics.princeton.edu/pulsar/K1JT/WSPRcode.exe   and run it in a dos window 
+//      Type (for example):   WSPRcode "K1ABC FN33 37"    37 is 5 watts, 30 is 1 watt, 33 is 2 watts, 27 is 1/2 watt
+//      ( Use capital letters in your call and locator when typing in the message string.  No extra spaces )
+//      Using the editing features of the dos window, mark and copy the last group of numbers
+//      Paste into notepad and replace all 3 with "3,"  all 2 with "2," all 1 with "1," all 0 with "0,"
+//      Remove the comma on the end
+//  the current message is   "K1URC FN54 23"
+const char wspr_msg[] = { 
+ 3, 3, 2, 2, 2, 0, 0, 2, 1, 2, 0, 2, 1, 1, 1, 2, 2, 2, 3, 0, 0, 1, 0, 1, 1, 3, 3, 2, 2, 0,
+ 2, 2, 0, 0, 3, 2, 0, 3, 0, 1, 2, 0, 2, 0, 0, 2, 3, 0, 1, 3, 2, 0, 1, 1, 2, 1, 0, 2, 0, 3,
+ 3, 2, 3, 2, 2, 2, 2, 1, 3, 2, 3, 0, 3, 0, 3, 0, 3, 2, 0, 3, 2, 0, 3, 0, 3, 1, 0, 2, 0, 1,
+ 1, 2, 1, 2, 3, 0, 2, 2, 3, 2, 2, 0, 2, 2, 1, 0, 2, 1, 2, 0, 3, 3, 1, 2, 3, 1, 2, 2, 3, 1,
+ 2, 1, 2, 0, 0, 1, 1, 3, 2, 2, 2, 2, 0, 1, 0, 1, 2, 0, 3, 1, 0, 2, 0, 0, 2, 2, 0, 1, 3, 0,
+ 1, 2, 3, 1, 0, 2, 2, 1, 3, 0, 2, 2
+ };
 
 
 void setup() {
@@ -50,9 +74,6 @@ int i;
     i2cd(SI5351,49+8*i,0);
   }
 
-  //si_pll_x(PLLA,freq+audio_freq,4*divider,0);   // transmit
-  //si_load_divider(4*divider,0,0);
-
   si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
   si_load_divider(cal_divider,2,0,1);
 
@@ -60,21 +81,31 @@ int i;
   si_load_divider(divider,0,0,Rdiv*4);  // TX clock 1/4th of the RX clock
   si_load_divider(divider,1,1,Rdiv);    // load divider for clock 1 and reset pll's
   
-//  i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks receiver and calibrate
-  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   //!!! testing only, all on
+  // i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks, receiver and calibrate
+    i2cd(SI5351,3,0xff ^ (CLK1_EN) );   // current cal method not feasible
+//  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
 }
 
-void qsy(){         // change frequency
+void qsy(uint32_t new_freq){         // change frequency
 unsigned char divf;
 uint32_t f4;
+static uint32_t old_freq = FREQ;
 
    divf = 0;   // flag if we need to reset the PLL's
-   if( freq > 15000000 && Rdiv >= 2 ) Rdiv = 1, divf = 1;
-   if( freq <  3000000 && Rdiv == 1 ) Rdiv = 2, divf = 1;
+   if( abs(old_freq - new_freq) > 500000){
+       divf = 1;    // large qsy from our current dividers
+       old_freq = new_freq;
+   }
+   freq = new_freq;
+   
+   if( freq >= 13000000 && Rdiv == 2 ) Rdiv = 1, divf = 1;
+   if( freq < 13000000 && Rdiv == 1 ) Rdiv = 2, divf = 1;
    f4 = Rdiv * 4 * freq;
-   f4 = f4 / 1000000;
-   while( f4 * divider > 900 ) divider -= 2, ++divf;
-   while( f4 * divider < 600 ) divider += 2, ++divf;
+   f4 = f4 / 100000;       // divide by zero next line if go below 100k on 4x vfo
+
+   if( divf ) divider = 7500 / f4;
+   if( divider & 1) divider += 1;   // make it even
+   
    if( divider > 254 ) divider = 254;
    if( divider < 6 ) divider = 6;
 
@@ -88,10 +119,112 @@ uint32_t f4;
 }
 
 void loop() {
+static unsigned long ms;
 
    if( Serial.availableForWrite() > 20 ) radio_control();
    
+   if( ms != millis()){     // run once each ms
+       ms = millis();
+       frame_timer(ms);
 
+       if( wspr_tx_enable ) wspr_tx(ms);
+      // if( cal_enable ) run_cal();
+   }
+
+}
+
+#ifdef NOWAY
+void run_cal(){    // count pulses on clock 2 wired to pin 5
+                   // IMPORTANT: jumper W4 to W7 on the arduino shield
+unsigned long result;
+long error;
+
+// calibrating the SI5351 against the 16mhz clock does not seem to be viable.
+// the 16mhz clock varies as much or more than the 27mhz clock with changes in temperature
+ cal_enable = 0;
+ return;
+ 
+   if( cal_enable == 1 ){
+       FreqCount.begin(1000);   //
+       ++cal_enable;
+   }
+
+   if( FreqCount.available() ){
+       result = FreqCount.read();
+       if(++cal_enable == 10 ){
+          cal_enable = 0;
+          FreqCount.end();
+       }
+      // Serial.print( (unsigned long)(clock_freq/100) ); Serial.write(' ');
+       Serial.println( result );  // debug only
+       error = result - 3000000;
+       //clock_freq += error;       // signed + unsigned ok ? clock_freq is 64 bit
+          // load new frequencies
+       //si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
+       //si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
+   }
+  
+}
+#endif
+
+void frame_timer( unsigned long t ){   
+static int msec;
+static unsigned long old_t;
+static uint8_t slot;
+static uint8_t sec;
+static int time_adjust;   
+// 16mhz clock measured at 16001111.  Will gain 1ms in approx 14401 ms.  Or 1 second in 4 hours.
+
+   msec += ( t - old_t );
+    time_adjust += (t - old_t);
+    if( time_adjust >= 14401 && msec != 0 ) time_adjust = 0, --msec;
+   old_t = t;
+   if( msec >= 1000 ){
+      msec -= 1000;
+      if( ++sec >= 120 ){     // 2 minute slot time
+        sec -= 120;
+        if( ++slot >= 10 ) slot = 0;   // 10 slots is a 20 minute frame
+        Serial.print(F("Slot ")); Serial.println(slot);
+        if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
+        // enable other modes in different slots
+        // if( slot != 1 ) cal_enable = 1;
+      }
+   } 
+}
+
+void wspr_tx( unsigned long t ){
+static int i;
+static unsigned long timer;
+static uint8_t mod;
+
+   if( i != 0 && (t - timer) < 683 ) return;   // baud time is 682.66666666 ms
+   timer = t;
+   ++mod;   mod &= 3;
+   if( mod == 0 ) ++timer;    // delay 683, 683, 682, etc.
+
+   if( i == 162 ){
+      tx_off();
+      i = 0;                 // setup for next time to begin at zero index
+      wspr_tx_enable = 0;    // flag done
+      return;
+   }
+   // set the frequency
+   si_pll_x(PLLA,Rdiv*4*(freq+audio_freq),divider,Rdiv*4*146*wspr_msg[i]);
+   if( i == 0 ) tx_on();
+   ++i; 
+}
+
+void tx_on(){
+
+  // !!! digital write the rx mute pin high
+  i2cd(SI5351,3,0xff ^ (CLK0_EN));   // other clocks off during tx
+}
+
+void tx_off(){
+  
+    si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
+    i2cd(SI5351,3,0xff ^ (CLK1_EN) );   // turn on clocks, receiver and calibrate if find a new way
+    // !!! unmute the RX with digital write 
 }
 
 
@@ -318,10 +451,7 @@ char buf[25];
   //    if( mode == CW && fun_selected[0] != WIDE ) val = val - (( sideband == USB ) ? mode_offset : - mode_offset);     
    //     cat_band_change((unsigned long)val);
   //      if( lcom == "FB" && xit_state ) xit = freq - val;
-        if( lcom == "FA" ){
-            freq = val;
-            qsy();
-        }
+        if( lcom == "FA" ) qsy(val);
    //     freq_display(freq);
     }
     else if( lcom == "KS" ){    /* keyer speed */
@@ -378,9 +508,6 @@ char buf[25];
 /*******************   stage buffer to avoid serial.print blocking ****************/
 //   modified to use serial function availableForWrite removing the need for a local
 //   character buffer
-
-
-
 
 void stage( unsigned char c ){
   Serial.write(c);
