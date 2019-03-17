@@ -4,7 +4,7 @@
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
 
 #include <Wire.h>
-// #include <FreqCount.h>
+#include <FreqCount.h>   // one UNO I have does not work correctly with this library, another one does
 
 #define SI5351   0x60    // i2c address
 #define PLLA 26   // register address offsets for PLL's
@@ -35,6 +35,8 @@ uint8_t  Rdiv = RDIV;
 uint8_t  operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;
 uint8_t cal_enable;
+long tm_correct_count = 10753;
+int8_t tm_correction = 0;
 
 //      Download WSPRcode.exe from  http://physics.princeton.edu/pulsar/K1JT/WSPRcode.exe   and run it in a dos window 
 //      Type (for example):   WSPRcode "K1ABC FN33 37"    37 is 5 watts, 30 is 1 watt, 33 is 2 watts, 27 is 1/2 watt
@@ -81,9 +83,9 @@ int i;
   si_load_divider(divider,0,0,Rdiv*4);  // TX clock 1/4th of the RX clock
   si_load_divider(divider,1,1,Rdiv);    // load divider for clock 1 and reset pll's
   
-  // i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks, receiver and calibrate
-    i2cd(SI5351,3,0xff ^ (CLK1_EN) );   // current cal method not feasible
-//  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
+  i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks, receiver and calibrate
+  //  i2cd(SI5351,3,0xff ^ (CLK1_EN) );   // current cal method not feasible
+  //  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
 }
 
 void qsy(uint32_t new_freq){         // change frequency
@@ -128,22 +130,22 @@ static unsigned long ms;
        frame_timer(ms);
 
        if( wspr_tx_enable ) wspr_tx(ms);
-      // if( cal_enable ) run_cal();
+       if( cal_enable ) run_cal();
    }
 
 }
 
-#ifdef NOWAY
+
+// the original idea was to correct the 27 mhz reference to the UNO 16 meg clock
+// calibrating the SI5351 against the 16mhz clock does not seem to be viable.
+// the 16mhz clock varies as much or more than the 27mhz clock with changes in temperature
+// changed to correct the time keeping of the 16 meg clock based upon the 27 mhz reference
 void run_cal(){    // count pulses on clock 2 wired to pin 5
                    // IMPORTANT: jumper W4 to W7 on the arduino shield
 unsigned long result;
 long error;
 
-// calibrating the SI5351 against the 16mhz clock does not seem to be viable.
-// the 16mhz clock varies as much or more than the 27mhz clock with changes in temperature
- cal_enable = 0;
- return;
- 
+
    if( cal_enable == 1 ){
        FreqCount.begin(1000);   //
        ++cal_enable;
@@ -151,21 +153,18 @@ long error;
 
    if( FreqCount.available() ){
        result = FreqCount.read();
-       if(++cal_enable == 10 ){
-          cal_enable = 0;
-          FreqCount.end();
-       }
-      // Serial.print( (unsigned long)(clock_freq/100) ); Serial.write(' ');
-       Serial.println( result );  // debug only
-       error = result - 3000000;
-       //clock_freq += error;       // signed + unsigned ok ? clock_freq is 64 bit
-          // load new frequencies
-       //si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
-       //si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
-   }
-  
+       if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
+       else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
+       else tm_correction = 0, error = 1500;
+       if( error < 2000 ) tm_correct_count = 3000000L / error;
+       else tm_correction = 0;
+       //Serial.println( result );  // debug only
+       //Serial.println(tm_correction);
+       //Serial.println(tm_correct_count);
+       FreqCount.end();
+       cal_enable = 0;
+   }  
 }
-#endif
 
 void frame_timer( unsigned long t ){   
 static int msec;
@@ -174,21 +173,25 @@ static uint8_t slot;
 static uint8_t sec;
 static int time_adjust;   
 // 16mhz clock measured at 16001111.  Will gain 1ms in approx 14401 ms.  Or 1 second in 4 hours.
+// time is still off @ 0.3 sec in 3h 20m, trying the result from the calibrate freqCount which would put the
+// 16mhz clock at 16001488.  Perhaps putting a probe near the crystal altered the frequency.
+// new calculation is a gain of 1 ms in 10753 millis()
+// now maybe finally, a new calculation is performed with the old calibrate code to adjust the frame timer.
 
    msec += ( t - old_t );
     time_adjust += (t - old_t);
-    if( time_adjust >= 14401 && msec != 0 ) time_adjust = 0, --msec;
+    if( time_adjust >= tm_correct_count && msec != 0 ) time_adjust = 0, msec += tm_correction;
    old_t = t;
    if( msec >= 1000 ){
       msec -= 1000;
       if( ++sec >= 120 ){     // 2 minute slot time
         sec -= 120;
-        if( ++slot >= 10 ) slot = 0;   // 10 slots is a 20 minute frame
-        Serial.print(F("Slot ")); Serial.println(slot);
+        if( ++slot >= 5 ) slot = 0;   // 10 slots is a 20 minute frame
+        // Serial.print(F("Slot ")); Serial.println(slot);
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
         // enable other modes in different slots
-        // if( slot != 1 ) cal_enable = 1;
       }
+      if( sec == 118 ) cal_enable = 1;   // do once per slot in wspr quiet time
    } 
 }
 
@@ -222,8 +225,8 @@ void tx_on(){
 
 void tx_off(){
   
+    i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn off tx, turn on rx ( and cal if find new algorithm )
     si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
-    i2cd(SI5351,3,0xff ^ (CLK1_EN) );   // turn on clocks, receiver and calibrate if find a new way
     // !!! unmute the RX with digital write 
 }
 
