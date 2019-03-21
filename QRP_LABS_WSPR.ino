@@ -55,6 +55,27 @@ const char wspr_msg[] = {
  };
 
 
+uint8_t band;            // current band
+struct BAND {
+   int pin;          // band relay switching
+   uint32_t  low;    // low frequency limit
+   uint32_t high;    // high frewquency limit
+};
+
+//  relay board was jumpered to NOT have filter 1 always in line and antenna connects to the bnc 
+//  on the arduino shield.  ( otherwise highest freq would need to be in position 1 and output would 
+//  be from the relay board )
+struct BAND band_info[6] = {    // filter
+  {  7,   40000,   600000 },    // 630m
+  { A0,  600000,  2500000 },    // 160m
+  { 10, 2500000,  6000000 },    // 60m
+  { 11, 6000000, 11500000 },    // 30m
+  { 12,11500000, 20000000 },    // 17m
+  { A3,20000000, 30000000 }     // 10m
+};  
+
+
+
 void setup() {
 int i;
   
@@ -62,6 +83,13 @@ int i;
   Wire.begin();
   Wire.setClock(400000);
 
+  // set up the relay pins, exercise the relays, delay is 1.2 seconds, so reset at 59 seconds odd minute to be on time
+  for( i = 0; i < 6; ++i ){
+    pinMode(band_info[i].pin,OUTPUT);
+    digitalWrite( band_info[i].pin,LOW );
+    delay(200);
+    digitalWrite( band_info[i].pin,HIGH );
+  }
 
   i2cd(SI5351,16,0x4f);   // clock 0, PLLA
   i2cd(SI5351,17,0x4f);   // clock 1, PLLA
@@ -84,8 +112,23 @@ int i;
   si_load_divider(divider,1,1,Rdiv);    // load divider for clock 1 and reset pll's
   
   i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks, receiver and calibrate
-  //  i2cd(SI5351,3,0xff ^ (CLK1_EN) );   // current cal method not feasible
   //  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
+
+  digitalWrite(band_info[band].pin,LOW);   // in case this turns out to be the correct relay
+  band_change();    // select the correct relay
+}
+
+uint8_t  band_change(){
+
+   if( freq > band_info[band].low && freq <= band_info[band].high ) return 0;
+
+   // band change needed
+   digitalWrite(band_info[band].pin,HIGH);
+   for( band = 0; band < 6; ++band ){
+      if( freq > band_info[band].low && freq <= band_info[band].high ) break;
+   }
+   if( band < 6 ) digitalWrite( band_info[band].pin,LOW);
+   return 1;
 }
 
 void qsy(uint32_t new_freq){         // change frequency
@@ -94,11 +137,15 @@ uint32_t f4;
 static uint32_t old_freq = FREQ;
 
    divf = 0;   // flag if we need to reset the PLL's
-   if( abs(old_freq - new_freq) > 500000){
+   if( abs((int32_t)old_freq - (int32_t)new_freq) > 500000){
        divf = 1;    // large qsy from our current dividers
        old_freq = new_freq;
    }
    freq = new_freq;
+   if( band_change() ) divf = 1;    // check the proper relay is selected
+
+   // force freq above a lower limit, will need more Rdiv to actually get this low.
+   if( freq < 40000 ) freq = 40000;
    
    if( freq >= 13000000 && Rdiv == 2 ) Rdiv = 1, divf = 1;
    if( freq < 13000000 && Rdiv == 1 ) Rdiv = 2, divf = 1;
@@ -136,10 +183,11 @@ static unsigned long ms;
 }
 
 
-// the original idea was to correct the 27 mhz reference to the UNO 16 meg clock
+// the original idea was to correct the 27 mhz clock using the UNO 16 mhz clock as a reference.
 // calibrating the SI5351 against the 16mhz clock does not seem to be viable.
 // the 16mhz clock varies as much or more than the 27mhz clock with changes in temperature
-// changed to correct the time keeping of the 16 meg clock based upon the 27 mhz reference
+// this function has been changed to correct the time keeping of the 16 meg clock based upon the 27 mhz reference
+// this seems to be working very well with no change in WSPR received delta time for over 48 hours.
 void run_cal(){    // count pulses on clock 2 wired to pin 5
                    // IMPORTANT: jumper W4 to W7 on the arduino shield
 unsigned long result;
@@ -155,10 +203,10 @@ long error;
        result = FreqCount.read();
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
-       else tm_correction = 0, error = 1500;
+       else tm_correction = 0, error = 1500;                    // avoid divide by zero
        if( error < 2000 ) tm_correct_count = 3000000L / error;
-       else tm_correction = 0;
-       //Serial.println( result );  // debug only
+       else tm_correction = 0;                   // defeat correction if freq counted is obviously wrong
+       //Serial.println( result );
        //Serial.println(tm_correction);
        //Serial.println(tm_correct_count);
        FreqCount.end();
@@ -173,10 +221,7 @@ static uint8_t slot;
 static uint8_t sec;
 static int time_adjust;   
 // 16mhz clock measured at 16001111.  Will gain 1ms in approx 14401 ms.  Or 1 second in 4 hours.
-// time is still off @ 0.3 sec in 3h 20m, trying the result from the calibrate freqCount which would put the
-// 16mhz clock at 16001488.  Perhaps putting a probe near the crystal altered the frequency.
-// new calculation is a gain of 1 ms in 10753 millis()
-// now maybe finally, a new calculation is performed with the old calibrate code to adjust the frame timer.
+// the calibrate function has been repurposed to correct the time keeping of the Arduino.
 
    msec += ( t - old_t );
     time_adjust += (t - old_t);
@@ -186,7 +231,7 @@ static int time_adjust;
       msec -= 1000;
       if( ++sec >= 120 ){     // 2 minute slot time
         sec -= 120;
-        if( ++slot >= 5 ) slot = 0;   // 10 slots is a 20 minute frame
+        if( ++slot >= 6 ) slot = 0;   // 10 slots is a 20 minute frame
         // Serial.print(F("Slot ")); Serial.println(slot);
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
         // enable other modes in different slots
@@ -225,7 +270,7 @@ void tx_on(){
 
 void tx_off(){
   
-    i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn off tx, turn on rx ( and cal if find new algorithm )
+    i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn off tx, turn on rx and cal clocks
     si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
     // !!! unmute the RX with digital write 
 }
@@ -331,6 +376,14 @@ int sm;
 
     operate_mode = CAT_MODE;      // switch to CAT MODE when receive a ';'
     lcommand = command.substring(0,2);
+
+    // special commands that look like query commands
+    if( lcommand == "TX" ){
+      wspr_tx_enable = 1;   // could use this to set the frame clock at 0 or 1 sec.
+      return;
+    }
+    if( lcommand == "RX" ) return;  // let wspr tx finish normally
+                                    // Otherwise will need to make the wspr index a global to shortcut tx. 
  
     if( command.substring(2,3) == ";" || command.substring(2,4) == "$;" || command.substring(0,2) == "RV" ){      /* it is a get command */
       stage_str(lcommand);  /* echo the command */
@@ -427,7 +480,7 @@ if applicable (0=DATA A, 1=AFSK A, 2= FSK D, 3=PSK D)
       }
       else if(lcommand == "BW"){
         stage_str("0300");
-      }       
+      }      
       else{
          stage('0');  /* don't know what it is */
       }
