@@ -3,10 +3,19 @@
 //   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
 
- // !!! extend lower freq limit down to 60 khz for wwvb
+//   The CAT emulation is TenTec Argonaut V at 1200 baud.
+
+//   To set a new operation frequency for stand alone Frame Mode, start wsjt-x or HRD.
+//   Tune to one of the magic WSPR frequencies and toggle TX (tune in wsjt will work).
+//   The new frequency will be stored in EEPROM.
+//   If using the band hopping feature of WSJT, disable the EEPROM writes, function ee_save(). 
+
+//  To Do:
+// !!! extend lower freq limit down to 60 khz for wwvb
  
 #include <Wire.h>
 #include <FreqCount.h>   // one UNO I have does not work correctly with this library, another one does
+#include <EEPROM.h>
 
 #define SI5351   0x60    // i2c address
 #define PLLA 26   // register address offsets for PLL's
@@ -14,9 +23,10 @@
 #define CLK0_EN   1
 #define CLK1_EN   2
 #define CLK2_EN   4
-#define FREQ  14095600   //7038600   // starting freq
-#define DIV   14 // 14        // starting divider for 4*freq*RDIV
-#define RDIV   1   //2        // starting sub divider ( 13 meg breakpoint for div = 1 )
+// the starting frequency will be read out of EEPROM except the 1st time when EEPROM is blank
+#define FREQ  7038600   // starting freq when EEPROM is blank
+#define DIV   14        // starting divider for 4*freq*RDIV
+#define RDIV   2        // starting sub divider ( 13 meg breakpoint for div = 1 )
 
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // or self timed frame (stand alone mode)
@@ -78,7 +88,37 @@ struct BAND band_info[6] = {    // filter
   { A3,20000000, 30000000 }     // 10m
 };  
 
+// wspr frequencies for eeprom save routine.  Only these will be saved.
+const uint32_t magic_freq[10] = {
+  474200, 1836600, 3568600, 7038600, 10138700, 14095600, 18104600, 21094600, 24924600, 28124600
+};
 
+void ee_save(){ 
+uint8_t i;
+static uint8_t last_i = 255;
+
+  //  return;   // uncomment if using the frequency hopping feature ( and transmitting )
+                // to avoid wearing out the eeprom
+                
+  for( i = 0; i < 10; ++i ){
+    if( freq == magic_freq[i] ) break;
+  }
+  if( i == 10 ) return;      // not a wspr frequency
+  if( i == last_i ) return;  // already wrote this one
+
+  last_i = i;
+  EEPROM.put(0,Rdiv);    // put does not write if data matches
+  EEPROM.put(1,freq);    // and hopefully this will not take long when there is a match
+  EEPROM.put(5,divider);
+}
+
+void ee_restore(){
+
+  if( EEPROM[0] == 255 ) return;   // blank eeprom
+  EEPROM.get(0,Rdiv);
+  EEPROM.get(1,freq);
+  EEPROM.get(5,divider);
+}
 
 void setup() {
 uint8_t i;
@@ -86,6 +126,8 @@ uint8_t i;
   Serial.begin(1200);      // TenTec Argo V baud rate
   Wire.begin();
   Wire.setClock(400000);
+
+  ee_restore();            // get default freq for frame mode from eeprom
 
   // set up the relay pins, exercise the relays, delay is 1.2 seconds, so reset at 59 seconds odd minute to be on time
   for( i = 0; i < 6; ++i ){
@@ -241,7 +283,7 @@ static int time_adjust;
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
         // enable other modes in different slots
       }
-      if( sec == 118 ) cal_enable = 1;   // do once per slot in wspr quiet time
+      if( sec == 118 && operate_mode == FRAME_MODE ) cal_enable = 1;   // do once per slot in wspr quiet time
    } 
 }
 
@@ -282,6 +324,8 @@ void tx_off(){
     i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn off tx, turn on rx and cal clocks
     si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
     // !!! unmute the RX with digital write 
+
+    ee_save();     // save this as the default band
 }
 
 
@@ -620,8 +664,10 @@ char cmd2;
    
    cmd2 = command[1];
    switch(cmd2){
-     case 0:  wspr_tx_cancel = 1;  break;
-     case 1:  wspr_tx_enable = 1;  break;
+     case '0':      // enter rx mode
+        if( wspr_tx_enable ) wspr_tx_cancel = 1;
+     break;
+     case '1':  wspr_tx_enable = 1;  break;    // TX
    }
 
 }
