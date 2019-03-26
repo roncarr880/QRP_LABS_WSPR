@@ -9,45 +9,49 @@
 //   Tune to one of the magic WSPR frequencies and toggle TX (tune in wsjt will work).
 //   The new frequency will be stored in EEPROM.
 //   If using the band hopping feature of WSJT, disable the EEPROM writes, function ee_save(). 
+//
+//   A 4:1 frequency relationship between the tx freq and the rx clock is maintained using the
+//   post dividers aka R dividers in the SI5351.  Dividers 1 - rx and 4 - tx will cover 1mhz to 30mhz
+//      Dividers 16 - rx and 64 - tx will cover 40 khz to 2 mhz
 
-//  To Do:
-// !!! extend lower freq limit down to 60 khz for wwvb
  
 #include <Wire.h>
 #include <FreqCount.h>   // one UNO I have does not work correctly with this library, another one does
 #include <EEPROM.h>
 
 #define SI5351   0x60    // i2c address
-#define PLLA 26   // register address offsets for PLL's
+#define PLLA 26          // register address offsets for PLL's
 #define PLLB 34
 #define CLK0_EN   1
 #define CLK1_EN   2
 #define CLK2_EN   4
 // the starting frequency will be read out of EEPROM except the 1st time when EEPROM is blank
 #define FREQ  7038600   // starting freq when EEPROM is blank
-#define DIV   14        // starting divider for 4*freq*RDIV
-#define RDIV   2        // starting sub divider ( 13 meg breakpoint for div = 1 )
-
+#define DIV   28        // starting divider for 4*freq*RDIV
+#define RDIV   1        // starting sub divider.  1 will cover less than 1mhz to > 30mhz.
+                        // 16 will cover 37khz to 2.3 mhz ( with the 4x factor it is 64 when transmitting )
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // or self timed frame (stand alone mode)
+#define MUTE  A1        // receiver module T/R switch pin
 
 #define stage(c) Serial.write(c)
-  // use even dividers between 6 and 254 for lower jitter
+
+  // using even dividers between 6 and 254 for lower jitter
   // freq range 2 to 150 without using the post dividers
-  // we are using the post dividers
+  // we are using the post dividers and can receive down to 40khz
   // vco 600 to 900
   
-uint64_t clock_freq = 2700452200;// 2700465300;// * 100 to enable setting fractional frequency
-uint32_t freq = FREQ;       // ssb vfo freq
+uint64_t clock_freq = 2700452200;    // * 100 to enable setting fractional frequency
+uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
-uint32_t divider = DIV;        //  7 mhz with Rdiv of 8, 28 mhz with Rdiv of 2
-uint32_t audio_freq = 1538;   // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t divider = DIV;
+uint32_t audio_freq = 1538;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 
-uint8_t  operate_mode = FRAME_MODE;   // start in stand alone timing mode
-uint8_t wspr_tx_enable;               // transmit enable
-uint8_t wspr_tx_cancel;               // CAT control RX command
+uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
+uint8_t wspr_tx_enable;              // transmit enable
+uint8_t wspr_tx_cancel;              // CAT control RX command cancels tx
 uint8_t cal_enable;
 long tm_correct_count = 10753;       // add or sub one ms for time correction per this many ms
 int8_t tm_correction = 0;            // 0, 1 or -1 time correction
@@ -79,10 +83,20 @@ struct BAND {
 //  relay board was jumpered to NOT have filter 1 always in line and antenna connects to the bnc 
 //  on the arduino shield.  ( otherwise highest freq would need to be in position 1 and output would 
 //  be from the relay board )
+//struct BAND band_info[6] = {    // filter
+//  {  7,   40000,   600000 },    // 630m
+//  { A0,  600000,  2500000 },    // 160m
+//  { 10, 2500000,  5000000 },    // 80m
+//  { 11, 5000000, 11500000 },    // 30m
+//  { 12,11500000, 20000000 },    // 17m
+//  { A3,20000000, 30000000 }     // 10m
+//};  
+
+// I don't have a 160m filter yet, so this is a modified table
 struct BAND band_info[6] = {    // filter
   {  7,   40000,   600000 },    // 630m
-  { A0,  600000,  2500000 },    // 160m
-  { 10, 2500000,  5000000 },    // 80m
+  { A0,  600000,  600001 },    // 160m
+  { 10,  600001,  5000000 },    // 80m
   { 11, 5000000, 11500000 },    // 30m
   { 12,11500000, 20000000 },    // 17m
   { A3,20000000, 30000000 }     // 10m
@@ -129,6 +143,9 @@ uint8_t i;
 
   ee_restore();            // get default freq for frame mode from eeprom
 
+  pinMode(MUTE,OUTPUT);    // receiver t/r switch
+  digitalWrite(MUTE,LOW);  // enable the receiver
+
   // set up the relay pins, exercise the relays, delay is 1.2 seconds, so reset at 59 seconds odd minute to be on time
   for( i = 0; i < 6; ++i ){
     pinMode(band_info[i].pin,OUTPUT);
@@ -161,7 +178,7 @@ uint8_t i;
   //  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
 
   digitalWrite(band_info[band].pin,LOW);   // in case this turns out to be the correct relay
-  band_change();    // select the correct relay
+  band_change();                           // select the correct relay
 }
 
 uint8_t  band_change(){
@@ -191,16 +208,16 @@ static uint32_t old_freq = FREQ;
    freq = new_freq;
    if( band_change() ) divf = 1;    // check the proper relay is selected
 
-   // force freq above a lower limit, will need more Rdiv to actually get this low.
+   // force freq above a lower limit
    if( freq < 40000 ) freq = 40000;
    
-   if( freq >= 13000000 && Rdiv == 2 ) Rdiv = 1, divf = 1;
-   if( freq < 13000000 && Rdiv == 1 ) Rdiv = 2, divf = 1;
+   if( freq > 2000000 && Rdiv != 1 ) Rdiv = 1, divf = 1;     // tx Rdiv is 4
+   if( freq < 1000000 && Rdiv != 16 ) Rdiv = 16, divf = 1;   // tx Rdiv is 64
    f4 = Rdiv * 4 * freq;
    f4 = f4 / 100000;       // divide by zero next line if go below 100k on 4x vfo
 
-   if( divf ) divider = 7500 / f4;
-   if( divider & 1) divider += 1;   // make it even
+   if( divf ) divider = 7500 / f4;      // else we are using the current divider
+   if( divider & 1) divider += 1;       // make it even
    
    if( divider > 254 ) divider = 254;
    if( divider < 6 ) divider = 6;
@@ -315,17 +332,17 @@ static uint8_t mod;
 
 void tx_on(){
 
-  // !!! digital write the rx mute pin high
-  i2cd(SI5351,3,0xff ^ (CLK0_EN));   // other clocks off during tx
+  digitalWrite(MUTE,HIGH);
+  i2cd(SI5351,3,0xff ^ (CLK0_EN));   // tx clock on, other clocks off during tx
 }
 
 void tx_off(){
   
     i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn off tx, turn on rx and cal clocks
     si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
-    // !!! unmute the RX with digital write 
+    digitalWrite(MUTE,LOW);                       // enable receiver
 
-    ee_save();     // save this as the default band
+    ee_save();     // save this freq to use during stand alone mode(FRAME MODE).
 }
 
 
@@ -360,7 +377,7 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
    bc128 =  (128 * r)/ clock_freq;
    P1 = 128 * a + bc128 - 512;
    P2 = 128 * b - c * bc128;
-   if( P2 > c ) P2 = 0;        // ? avoid negative numbers 
+   if( P2 > c ) P2 = 0;        // avoid negative numbers 
    P3 = c;
 
    i2cd(SI5351, pll + 0, (P3 & 0x0000FF00) >> 8);
