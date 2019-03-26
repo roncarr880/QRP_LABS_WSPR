@@ -1,7 +1,8 @@
 # QRP_LABS_WSPR
-A wspr transmitter and general coverage receiver using the QRP Labs arduino shield and receiver module.
+A wspr transmitter and general coverage receiver using the QRP Labs arduino shield and receiver module.\
+Headless design, no display or switches.  Computer controlled with WSJT-X, HRD, or stand alone operation.
 
-Status:   Work in progress
+Status:   Transmit usable now.   CAT works with WSJT and HRD.  Thinking about adding the QRP Labs OCXO.
 
 Major changes:
 
