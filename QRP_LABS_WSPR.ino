@@ -132,6 +132,9 @@ void ee_restore(){
   EEPROM.get(0,Rdiv);
   EEPROM.get(1,freq);
   EEPROM.get(5,divider);
+  Serial.println(Rdiv);
+  Serial.println(freq);
+  Serial.println(divider);
 }
 
 void setup() {
@@ -139,7 +142,8 @@ uint8_t i;
   
   Serial.begin(1200);      // TenTec Argo V baud rate
   Wire.begin();
-  Wire.setClock(400000);
+// Wire.setClock(400000);  // should work but clock 1 starts on the wrong frequency
+  Wire.endTransmission();  // in case power up in a start state
 
   ee_restore();            // get default freq for frame mode from eeprom
 
@@ -173,6 +177,8 @@ uint8_t i;
   si_pll_x(PLLA,Rdiv*4*freq,divider,0); // receiver 4x clock
   si_load_divider(divider,0,0,Rdiv*4);  // TX clock 1/4th of the RX clock
   si_load_divider(divider,1,1,Rdiv);    // load divider for clock 1 and reset pll's
+//  qsy(freq);                              // let this function init the clocks and also set the default
+                                          // value of the static variable there
   
   i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks, receiver and calibrate
   //  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
@@ -198,10 +204,10 @@ uint8_t  band_change(){
 void qsy(uint32_t new_freq){         // change frequency
 unsigned char divf;
 uint32_t f4;
-static uint32_t old_freq = FREQ;
+static uint32_t old_freq = 0;
 
    divf = 0;   // flag if we need to reset the PLL's
-   if( abs((int32_t)old_freq - (int32_t)new_freq) > 500000){
+   if( (abs((int32_t)old_freq - (int32_t)new_freq) > 500000)  || old_freq == 0){
        divf = 1;    // large qsy from our current dividers
        old_freq = new_freq;
    }
