@@ -11,8 +11,8 @@
 //   If using the band hopping feature of WSJT, disable the EEPROM writes, function ee_save(). 
 //
 //   A 4:1 frequency relationship between the tx freq and the rx clock is maintained using the
-//   post dividers aka R dividers in the SI5351.  Dividers 1 - rx and 4 - tx will cover 1mhz to 30mhz
-//      Dividers 16 - rx and 64 - tx will cover 40 khz to 2 mhz
+//   R dividers in the SI5351.  Dividers 1 - rx and 4 - tx will cover 1mhz to 30mhz
+//   Dividers 16 - rx and 64 - tx will cover 40 khz to 2 mhz
 
  
 #include <Wire.h>
@@ -111,7 +111,7 @@ void ee_save(){
 uint8_t i;
 static uint8_t last_i = 255;
 
-  //  return;   // uncomment if using the frequency hopping feature ( and transmitting )
+  //  return;   // uncomment if using the frequency hopping feature and transmitting on more than one band 
                 // to avoid wearing out the eeprom
                 
   for( i = 0; i < 10; ++i ){
@@ -132,9 +132,9 @@ void ee_restore(){
   EEPROM.get(0,Rdiv);
   EEPROM.get(1,freq);
   EEPROM.get(5,divider);
-  Serial.println(Rdiv);
-  Serial.println(freq);
-  Serial.println(divider);
+  //Serial.println(Rdiv);
+  //Serial.println(freq);
+  //Serial.println(divider);
 }
 
 void setup() {
@@ -143,7 +143,6 @@ uint8_t i;
   Serial.begin(1200);      // TenTec Argo V baud rate
   Wire.begin();
 // Wire.setClock(400000);  // should work but clock 1 starts on the wrong frequency
-  Wire.endTransmission();  // in case power up in a start state
 
   ee_restore();            // get default freq for frame mode from eeprom
 
@@ -177,8 +176,6 @@ uint8_t i;
   si_pll_x(PLLA,Rdiv*4*freq,divider,0); // receiver 4x clock
   si_load_divider(divider,0,0,Rdiv*4);  // TX clock 1/4th of the RX clock
   si_load_divider(divider,1,1,Rdiv);    // load divider for clock 1 and reset pll's
-//  qsy(freq);                              // let this function init the clocks and also set the default
-                                          // value of the static variable there
   
   i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn on clocks, receiver and calibrate
   //  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
@@ -217,8 +214,8 @@ static uint32_t old_freq = 0;
    // force freq above a lower limit
    if( freq < 40000 ) freq = 40000;
    
-   if( freq > 2000000 && Rdiv != 1 ) Rdiv = 1, divf = 1;     // tx Rdiv is 4
-   if( freq < 1000000 && Rdiv != 16 ) Rdiv = 16, divf = 1;   // tx Rdiv is 64
+   if( freq > 2000000 && Rdiv != 1 ) Rdiv = 1, divf = 1;     // tx R is 4
+   if( freq < 1000000 && Rdiv != 16 ) Rdiv = 16, divf = 1;   // tx R is 64
    f4 = Rdiv * 4 * freq;
    f4 = f4 / 100000;       // divide by zero next line if go below 100k on 4x vfo
 
@@ -302,9 +299,7 @@ static int time_adjust;
       if( ++sec >= 120 ){     // 2 minute slot time
         sec -= 120;
         if( ++slot >= 6 ) slot = 0;   // 10 slots is a 20 minute frame
-        // Serial.print(F("Slot ")); Serial.println(slot);
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
-        // enable other modes in different slots
       }
       if( sec == 118 && operate_mode == FRAME_MODE ) cal_enable = 1;   // do once per slot in wspr quiet time
    } 
@@ -451,7 +446,7 @@ int done;
        c = Serial.read();
        command[len] = c;
        if(++len >= CMDLEN ) len= 0;  /* something wrong */
-       if( len == 1 ) cmd = c;  /* first char */
+       if( len == 1 ) cmd = c;       /* first char */
        /* sync ok ? */
        if( cmd == '?' || cmd == '*' || cmd == '#' );  /* ok */
        else{
@@ -473,10 +468,9 @@ int done;
 
  /* prepare for next command */
    len = expect_len= 0;
-  // if( cmd != '?' ){   // does wsjt need to see the G returned for query commands?.  Yes it does.
-     stage('G');       /* they are all good commands */
-     stage('\r');
-  // }
+   stage('G');       /* they are all good commands */
+   stage('\r');
+
 }
 
 int lookup_len(char cmd2){     /* just need the length of the command */
@@ -498,119 +492,69 @@ int len;
 
 void set_cmd(){
 char cmd2;
-long arg;
-char val1;
-int  val2;
 unsigned long val4;
 
    cmd2 = command[1];
    switch(cmd2){
     case 'X':   stage_str("RADIO START"); stage('\r'); break; 
     case 'O':   /* split */ 
-       val1 = command[2];
-     //  if( val1 && user[SPLIT] ) val1 = 0;      /* toggle from HRD instead of zero to shut off? */
-     //  if( val1 ) split= user[SPLIT] = 1;
-     //  else{
-     //    if( split == 2 ) rx_vfo = tx_vfo;
-     //    else tx_vfo = rx_vfo;
-     //    split= user[SPLIT] = user[SWAPVFO] = 0;
-      // }
     break;
-    case 'A':
+    case 'A':   // set frequency
     case 'B':
        val4 = get_long();
-      // if( mode == CW && fun_selected[0] != WIDE ) val4 = val4 - (( sideband == USB ) ? mode_offset : - mode_offset);            
-      // cat_band_change(val4);    // check for band change
-      // if( cmd2 == 'B' ) tx_vfo = val4;
-      // else{
-      //     rx_vfo = val4;
-      //     if( split == 0 ) tx_vfo = val4;
-      // }
-      qsy(val4);       
+       qsy(val4);       
     break;
     case 'E':
        if( command[2] == 'V' ) vfo = command[3];
     break;
     case 'W':    /* bandwidth */
-       val1 = command[2];
-   //    if( val1 < 12 ) fun_selected[0] = NARROW;   /* narrow */
-   //    else if( val1 > 23 ) fun_selected[0] = WIDE;  /* wide */
-   //    else fun_selected[0] = MEDIUM;
-   //    set_band_width(fun_selected[0]);
     break;
-    case 'K':            /* putting keying speed on the Noise Blanker slider. Range is 10 to 19 */
-                         /* or could be easily doubled for a range of 10 to 28 - if so change the get cmd also*/
-     //  wpm = command[2] + 10;
+    case 'K':    /* keying speed */
     break;
-    case 'T':            /* added tuning rate as a command */
-      // set_tuning_rate(command[2]);
-      // fun_selected[1] = command[2];
+    case 'T':    /* added tuning rate as a command */
     break;       
-    
-   }  /* end switch */
-
-   //update_frequency(DISPLAY_UPDATE);
-   
-   //write_sleds(sleds[fun_selected[function]]);
-   //write_fleds(fleds[function], 1);  /* update on/off status  on FGRN led */
-   //led_on_timer = 1000;  
-   
+   }  /* end switch */   
 }
 
 void get_cmd(){
 char cmd2;
 long arg;
-int bat;
 int len;
 
-   cmd2 = command[1];
-//   nope breaks HRD also stage(command[0]);    // does wsjt need to see the question mark ?   
+   cmd2 = command[1];   
    stage(cmd2);
    switch(cmd2){
-    case 'A':  //arg= rx_vfo;
+    case 'A':     // get frequency
     case 'B': 
       arg = freq;
-      // if( cmd2 == 'B' ) arg= tx_vfo;
-      // if( mode == CW && fun_selected[0] != WIDE ) arg = arg + (( sideband == USB ) ? mode_offset : - mode_offset);           
-       stage_long(arg);
+      stage_long(arg);
     break;
     case 'V':   /* version */
-     //  stage(' ');
-     //  bat = 135;   // battery(0);
-     //  stage_num(bat/10);
-     //  stage('.');
-      // stage_num(bat % 10);
-      // if( user[SWAPVFO] ) stage_str(" SWAP"); 
       stage_str("ER 1010-516");
     break;
     case 'W':          /* receive bandwidth */
-       stage(30);   //stage(40 - fun_selected[0] * 10 );
+       stage(30);
     break;
-    case 'M':          /* mode */
+    case 'M':          /* mode. 1 is USB USB  ( 3 is CW ) */
        stage('1'); stage('1');
     break;
     case 'O':          /* split */   
-       //if( split ) stage(1);
-       //else stage(0);
        stage(0);
     break;
     case 'P':         /*  passband slider */
        stage_int( 3000 );
     break;
     case 'T':         /* added tuning rate command */
-       //stage( fun_selected[1] );
     break;   
     case 'E':         /* vfo mode */
-       stage('V');
-      // if( split == 2 ) stage('B');
-      // else
+      stage('V');
       stage(vfo);
     break;
     case 'S':         /* signal strength */
        stage(7);
        stage(0);
     break;
-    case 'C':
+    case 'C':      // transmitting status 
        stage(0);
        stage(wspr_tx_enable);
     break;
@@ -623,8 +567,7 @@ int len;
     break;    
    }
   
-   stage('\r');
- //   stage('\n');    // does wsjt need to see line feeds ?  
+   stage('\r');  
 }
 
 
@@ -660,7 +603,6 @@ union{
 int i;
 
   for( i = 0; i < 4; ++i) val.ch[i] = command[5-i]; // or i+2 for other endian
-
   return val.v;
 }
 
