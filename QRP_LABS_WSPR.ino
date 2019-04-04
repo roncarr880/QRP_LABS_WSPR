@@ -1,6 +1,6 @@
 
 // QRP_LABS_WSPR
-//   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module
+//   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module, QRP Labs relay board.
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
 
 //   The CAT emulation is TenTec Argonaut V at 1200 baud.
@@ -83,26 +83,16 @@ struct BAND {
 //  relay board was jumpered to NOT have filter 1 always in line and antenna connects to the bnc 
 //  on the arduino shield.  ( otherwise highest freq would need to be in position 1 and output would 
 //  be from the relay board )
-//struct BAND band_info[6] = {    // filter
-//  {  7,   40000,   600000 },    // 630m
-//  { A0,  600000,  2500000 },    // 160m
-//  { 10, 2500000,  5000000 },    // 80m
-//  { 11, 5000000, 11500000 },    // 30m
-//  { 12,11500000, 20000000 },    // 17m
-//  { A3,20000000, 30000000 }     // 10m
-//};  
-
-// I don't have a 160m filter yet, so this is a modified table
-struct BAND band_info[6] = {    // filter
+struct BAND band_info[6] = {    // filter selected
   {  7,   40000,   600000 },    // 630m
-  { A0,  600000,  600001 },    // 160m
-  { 10,  600001,  5000000 },    // 80m
+  { A0,  600000,  2500000 },    // 160m
+  { 10, 2500000,  5000000 },    // 80m
   { 11, 5000000, 11500000 },    // 30m
   { 12,11500000, 20000000 },    // 17m
   { A3,20000000, 30000000 }     // 10m
 };  
 
-// wspr frequencies for eeprom save routine.  Only these will be saved.
+// wspr frequencies for eeprom save routine.  Only these frequencies will be saved.
 const uint32_t magic_freq[10] = {
   474200, 1836600, 3568600, 7038600, 10138700, 14095600, 18104600, 21094600, 24924600, 28124600
 };
