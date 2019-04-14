@@ -5,10 +5,11 @@
 
 //   The CAT emulation is TenTec Argonaut V at 1200 baud.
 
-//   To set a new operation frequency for stand alone Frame Mode, start wsjt-x or HRD.
+//   To set a new operation frequency for stand alone Frame Mode, restart the Arduino, start wsjt-x or HRD.
 //   Tune to one of the magic WSPR frequencies and toggle TX (tune in wsjt will work).
 //   The new frequency will be stored in EEPROM.
-//   If using the band hopping feature of WSJT, disable the EEPROM writes, function ee_save(). 
+//   If using the band hopping feature of WSJT, make sure the first transmit is on the band you wish for
+//   the default.  Only one save is performed per Arduino reset. 
 //
 //   A 4:1 frequency relationship between the tx freq and the rx clock is maintained using the
 //   R dividers in the SI5351.  Dividers 1 - rx and 4 - tx will cover 1mhz to 30mhz
@@ -101,14 +102,15 @@ void ee_save(){
 uint8_t i;
 static uint8_t last_i = 255;
 
-  //  return;   // uncomment if using the frequency hopping feature and transmitting on more than one band 
-                // to avoid wearing out the eeprom
+  if( last_i != 255 ) return; // save only the freq of the 1st time transmitting after reset
                 
   for( i = 0; i < 10; ++i ){
     if( freq == magic_freq[i] ) break;
   }
   if( i == 10 ) return;      // not a wspr frequency
-  if( i == last_i ) return;  // already wrote this one
+  // if( i == last_i ) return;  // already wrote this one. ( redundant - only saving 1st power up tx freq now
+                                // instead of the last transmit freq. This allows wsjt band hopping tx
+                                // without wearing out the eeprom
 
   last_i = i;
   EEPROM.put(0,Rdiv);    // put does not write if data matches
