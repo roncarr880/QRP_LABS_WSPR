@@ -108,6 +108,7 @@ const uint32_t magic_freq[10] = {
 uint64_t wwvb_data, wwvb_sync;
 
 uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 2 for normal use to avoid all printing
+uint8_t wwvb_stats[8];   // bit distribution over 60 seconds
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
 
@@ -253,7 +254,7 @@ static unsigned long ms;
 
        if( wspr_tx_enable || wspr_tx_cancel ) wspr_tx(ms);
        if( cal_enable ) run_cal();
-       wwvb_sample();
+       wwvb_sample(ms);
    }
 
 }
@@ -261,11 +262,20 @@ static unsigned long ms;
 
 // each second starts with a low signal and ends with a high signal
 // much like software sampling rs232 start and stop bits.
-void wwvb_sample(){
+void wwvb_sample(unsigned long t){
+static unsigned long old_t;
+int loops;
 uint8_t b;
-static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;
-static uint8_t secs,zeros,syncs,early,late,mid;   // debug use
+static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
+static uint8_t secs,zeros,syncs,early,late;   // debug use
+uint16_t decodes;
 
+   loops = t - old_t;
+   old_t = t;
+   
+  while( loops-- ){   // repeat for any missed milliseconds  
+    
+  
    if( digitalRead(WWVB_OUT) == LOW ) ++wwvb_sum;
 
    if( --wwvb_clk == 0 ){    // end of 125ms period, dump integrator
@@ -281,26 +291,30 @@ static uint8_t secs,zeros,syncs,early,late,mid;   // debug use
       wwvb_count++;
       wwvb_count &= 7;
       if( wwvb_count == 0 ){    // decode time
-        // clocks late or early?
-        if( ( wwvb_tmp & 3 ) == 1 ){    // early  xxxxxx01, should be 11xxxx00
-           ++wwvb_clk;
-           wwvb_tmp >>= 1;
-           wwvb_tmp |= 128;   // shift the one bit to the other end
-           ++early;
-        }
-        else if( (wwvb_tmp & 128) == 0 ){  // late
-           --wwvb_clk;
-           wwvb_tmp <<= 1;    // shift the zero off the high end and add zero on low end
-           ++late;
-        }
-        else if( (wwvb_tmp & 0x81) == 0x81 ){       // way out of sync, zero's are mid position
-           if( wwvb_tmp != 0xff ) wwvb_clk -= 4, ++mid;    // move in the late direction, 3 minutes to sync up
-        }
+
+        // clocks late or early, just dither them back and forth across the falling edge
+      if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
+         if( digitalRead(WWVB_OUT) == 0 ){  
+            ++late;               // sampling late
+            wwvb_clk -= 2;        // adjust sample to earlier
+         }
+         else{
+            ++early;              // need to sample later
+            wwvb_clk += 2;        // longer clock ( more of these as arduino runs fast )
+         }
+      }
+        
+      gather_stats( wwvb_tmp );
+      
+       // force start and stop bits, cheating
+     // wwvb_tmp |= 0x80;
+     // wwvb_tmp &= 0xfe;
 
         // decode
         // 11111110 or 11111100 is a zero
         // 11000000 or 10000000 is a sync
         // otherwise just assume it is a one
+        
         b = 1;
         if( wwvb_tmp == 0xfe || wwvb_tmp == 0xfc ) b = 0, ++zeros;
         wwvb_data <<= 1;   wwvb_data |= b;
@@ -308,27 +322,56 @@ static uint8_t secs,zeros,syncs,early,late,mid;   // debug use
         if( wwvb_tmp == 0x80 || wwvb_tmp == 0xc0 ) b = 1, ++syncs;
         wwvb_sync <<= 1;   wwvb_sync |= b;
 
-        if( wwvb_quiet == 0 ){   // debug print out some stats until get a good decode
+        if( wwvb_quiet == 0 ){   // debug print out some stats ( not zero is assumed one and not printed )
            if( ++secs == 60 ){
                Serial.print("Zeros "); Serial.print(zeros);
                Serial.print("  Syncs "); Serial.print(syncs);
                Serial.print("  Early "); Serial.print(early);
                Serial.print("  Late ");  Serial.print(late);
-               Serial.print("  Mid "); Serial.println(mid);
-               mid = early = late = secs = zeros = syncs = 0;
+               print_stats();
+               Serial.print("  Decodes "); Serial.println(decodes);
+               early = late = secs = zeros = syncs = 0;
            }
         }
         // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
         // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
         // wwvb_sync &= 0x0fffffffffffffff;   // mask off the old bits from previous minute
         // instead of masking, use the old bits to see the double sync bits at 0 of this minute
-        // and 59 seconds of the previous minute.
-        if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ) wwvb_decode();
-      }
-    
+        // and 59 seconds of the previous minute.  This decodes at zero time rather than some
+        // algorithms that decode at 1 second past.
+        if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
+          wwvb_decode();
+          ++decodes;
+        }
+      }    
    }
-  
+  }
 }
+
+void gather_stats( uint8_t data ){
+uint8_t i;
+
+   for( i = 0; i < 8; ++i ){
+      if( data & 1 ) ++wwvb_stats[i];
+      data >>= 1;
+   } 
+}
+
+
+void print_stats(){
+uint8_t i;
+
+   Serial.print("  Data ");
+   for( i = 7;  i < 8; --i ){
+      if( wwvb_stats[i] > 50 ) Serial.write('1');
+      else if( wwvb_stats[i] < 10 ) Serial.write('0');
+      else if( wwvb_stats[i] > 30 ) Serial.write('X');
+      else Serial.write('x');
+      wwvb_stats[i] = 0;
+   }
+}
+
+
 
 void wwvb_decode(){   // decodes the previous minute
 uint16_t tmp;
@@ -343,8 +386,6 @@ uint8_t dy;
   // can keep a count of how long it takes to gain or loose and adjust
   // the value of the 27 mhz clock
 
-  if( wwvb_quiet == 0 ) wwvb_quiet = 1;    // stop printing stats on the first good decode
-                                           // but continue to print decodes
   tmp = ( wwvb_data >>( 59 - 53) ) & 0x1ff;
   yr = 0;
   if( tmp & 0x100 ) yr += 80;
