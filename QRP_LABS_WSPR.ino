@@ -47,7 +47,7 @@ uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1538;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1528;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
@@ -100,17 +100,18 @@ const uint32_t magic_freq[10] = {
 
 // WWVB receiver in a fringe area - integrate the signal to remove noise
 // Although it probably makes more sense to dump the integrator 10 times per second, here we use 8.
-// sample each millisecond, sum 125 samples , decide if low or high, shift into temp variable
+// sample each millisecond, sum 100 or 150 samples , decide if low or high, shift into temp variable
 // at end of 1 second( 8 bits), decide if temp has a 1, 0, or sync. Shift into 64 bit data and sync variables.
 // when the sync variable contains the magic number, decode the 64 bit data.
 #define WWVB_OUT 9
 #define WWVB_PWDN 8
-uint64_t wwvb_data, wwvb_sync;
+uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 
 uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 2 for normal use to avoid all printing
 uint8_t wwvb_stats[8];   // bit distribution over 60 seconds
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
+int frame_msec;
 
 void ee_save(){ 
 uint8_t i;
@@ -265,72 +266,67 @@ static unsigned long ms;
 void wwvb_sample(unsigned long t){
 static unsigned long old_t;
 int loops;
-uint8_t b;
+uint8_t b,s,e;
 static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
-static uint8_t secs,zeros,syncs,early,late;   // debug use
-uint16_t decodes;
+const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
+static uint8_t secs,errors,early,late;   // debug use
+static uint16_t decodes;
+static uint8_t dither = 4;   // quick sync
 
    loops = t - old_t;
    old_t = t;
    
   while( loops-- ){   // repeat for any missed milliseconds  
-    
-  
+
    if( digitalRead(WWVB_OUT) == LOW ) ++wwvb_sum;
 
-   if( --wwvb_clk == 0 ){    // end of 125ms period, dump integrator
-      b = ( wwvb_sum > 62 ) ? 0 : 128;
+   if( --wwvb_clk == 0 ){    // end of period, dump integrator
+      b = ( wwvb_sum > 50 ) ? 0 : 128;
       wwvb_tmp >>= 1;
       wwvb_tmp |= b;
       wwvb_sum = 0;
-      wwvb_clk = 125;
 
-      // 8 dumps of the integrator is one second, decode this bit
-      // with the integrator and 125ms sample periods, break points of the decode are at
-      // 312 ms and 688 ms to decode zero, one, sync
+      // 8 dumps of the integrator is one second, decode this bit ?
       wwvb_count++;
       wwvb_count &= 7;
+      wwvb_clk = counts[wwvb_count];  // 100 100 150 150 150 150 100 100
+                              // decode     0       1      sync    stop should be high
       if( wwvb_count == 0 ){    // decode time
 
         // clocks late or early, just dither them back and forth across the falling edge
       if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
          if( digitalRead(WWVB_OUT) == 0 ){  
             ++late;               // sampling late
-            wwvb_clk -= 2;        // adjust sample to earlier
+            wwvb_clk -= dither;        // adjust sample to earlier
          }
          else{
             ++early;              // need to sample later
-            wwvb_clk += 2;        // longer clock ( more of these as arduino runs fast )
+            wwvb_clk += dither;        // longer clock ( more of these as arduino runs fast )
          }
       }
-        
-      gather_stats( wwvb_tmp );
       
-       // force start and stop bits, cheating
-     // wwvb_tmp |= 0x80;
-     // wwvb_tmp &= 0xfe;
+      gather_stats( wwvb_tmp );
 
         // decode
-        // 11111110 or 11111100 is a zero
-        // 11000000 or 10000000 is a sync
-        // otherwise just assume it is a one
-        
-        b = 1;
-        if( wwvb_tmp == 0xfe || wwvb_tmp == 0xfc ) b = 0, ++zeros;
+        // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
+        b = 0;  s = 0;  e = 1;   // assume it is an error
+        if( wwvb_tmp == 0xfc ) e = 0, b = 0;
+        if( wwvb_tmp == 0xf0 ) e = 0, b = 1;
+        if( wwvb_tmp == 0xc0 ) e = 0, s = 1;
         wwvb_data <<= 1;   wwvb_data |= b;
-        b = 0;    // assume not a sync
-        if( wwvb_tmp == 0x80 || wwvb_tmp == 0xc0 ) b = 1, ++syncs;
-        wwvb_sync <<= 1;   wwvb_sync |= b;
+        wwvb_sync <<= 1;   wwvb_sync |= s;
+        wwvb_errors <<= 1; wwvb_errors |= e;
+        if( e ) ++errors;
 
-        if( wwvb_quiet == 0 ){   // debug print out some stats ( not zero is assumed one and not printed )
+        if( wwvb_quiet < 30 ){   // - debug print out some stats when not in CAT mode
            if( ++secs == 60 ){
-               Serial.print("Zeros "); Serial.print(zeros);
-               Serial.print("  Syncs "); Serial.print(syncs);
+               Serial.print("Errors "); Serial.print(errors);
                Serial.print("  Early "); Serial.print(early);
                Serial.print("  Late ");  Serial.print(late);
                print_stats();
                Serial.print("  Decodes "); Serial.println(decodes);
-               early = late = secs = zeros = syncs = 0;
+               dither = ( errors > 30 ) ? 4 : 1;
+               early = late = secs = errors = 0;
            }
         }
         // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
@@ -340,8 +336,10 @@ uint16_t decodes;
         // and 59 seconds of the previous minute.  This decodes at zero time rather than some
         // algorithms that decode at 1 second past.
         if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
-          wwvb_decode();
-          ++decodes;
+          if( wwvb_errors == 0 ){    // decode on no bit errors
+            wwvb_decode();
+            ++decodes;
+          }
         }
       }    
    }
@@ -417,7 +415,16 @@ uint8_t dy;
   if( tmp & 0x20 ) mn += 10;
   mn += tmp & 0xf;
 
-  if( wwvb_quiet > 1 ) return;    // avoid printing on the serial port, interfers with radio_control
+  // sync the frame timer to wwvb, don't change time at the start or end of the frame or
+  // may skip frames or repeat frames
+  if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
+    if( frame_sec > 20 && frame_sec < 100 ){   // just in case there was a bit error in the minute field
+      frame_sec = 60;
+      frame_msec = 0;
+    }  
+  }
+
+  if( wwvb_quiet > 30 ) return;    // avoid printing on the serial port, interfers with radio_control
   Serial.print(frame_sec);  Serial.write(' ');
   Serial.print("WWVB SYNC   ");
   Serial.print("20");  // the year 2100 bug
@@ -461,7 +468,6 @@ long error;
 }
 
 void frame_timer( unsigned long t ){   
-static int msec;
 static unsigned long old_t;
 static uint8_t slot;
 
@@ -469,15 +475,15 @@ static int time_adjust;
 // 16mhz clock measured at 16001111.  Will gain 1ms in approx 14401 ms.  Or 1 second in 4 hours.
 // the calibrate function has been repurposed to correct the time keeping of the Arduino.
 
-   msec += ( t - old_t );
+   frame_msec += ( t - old_t );
     time_adjust += (t - old_t);
-    if( time_adjust >= tm_correct_count && msec != 0 ) time_adjust = 0, msec += tm_correction;
+    if( time_adjust >= tm_correct_count && frame_msec != 0 ) time_adjust = 0, frame_msec += tm_correction;
    old_t = t;
-   if( msec >= 1000 ){
-      msec -= 1000;
+   if( frame_msec >= 1000 ){
+      frame_msec -= 1000;
       if( ++frame_sec >= 120 ){     // 2 minute slot time
         frame_sec -= 120;
-        if( ++slot >= 6 ) slot = 0;   // 10 slots is a 20 minute frame
+        if( ++slot >= 7 ) slot = 0;   // 10 slots is a 20 minute frame
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
       }
       if( frame_sec == 118 && operate_mode == FRAME_MODE ) cal_enable = 1;   // do once per slot in wspr quiet time
@@ -643,7 +649,11 @@ int done;
     
     if( done == 0 ) return;  /* command not complete yet */
         
-    if( cmd == '?' )  get_cmd(), operate_mode = CAT_MODE;   // switch modes on query cat command
+    if( cmd == '?' ){
+      get_cmd();
+      operate_mode = CAT_MODE;   // switch modes on query cat command
+      if( wwvb_quiet < 40 ) ++wwvb_quiet;  // allow some manual CAT commands before shutting off wwvb debug
+    }
     if( cmd == '*' )  set_cmd();
     if( cmd == '#' )  pnd_cmd(); 
 
