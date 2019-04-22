@@ -2,6 +2,7 @@
 // QRP_LABS_WSPR
 //   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module, QRP Labs relay board.
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
+//   Added a CANADAUINO  WWVB interface to keep time.
 
 //   The CAT emulation is TenTec Argonaut V at 1200 baud.
 
@@ -107,11 +108,13 @@ const uint32_t magic_freq[10] = {
 #define WWVB_PWDN 8
 uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 
-uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 2 for normal use to avoid all printing
+uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 1 for printing or enter 1 CAT command query ( ?V )
 uint8_t wwvb_stats[8];   // bit distribution over 60 seconds
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
+
+/***************************************************************************/
 
 void ee_save(){ 
 uint8_t i;
@@ -263,6 +266,7 @@ static unsigned long ms;
 
 // each second starts with a low signal and ends with a high signal
 // much like software sampling rs232 start and stop bits.
+// this routine runs fast by design until it locks on the wwvb signal
 void wwvb_sample(unsigned long t){
 static unsigned long old_t;
 int loops;
@@ -270,8 +274,7 @@ uint8_t b,s,e;
 static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
 const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
 static uint8_t secs,errors,early,late;   // debug use
-static uint16_t decodes;
-static uint8_t dither = 4;   // quick sync
+static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 
    loops = t - old_t;
    old_t = t;
@@ -294,13 +297,14 @@ static uint8_t dither = 4;   // quick sync
       if( wwvb_count == 0 ){    // decode time
 
         // clocks late or early, just dither them back and forth across the falling edge
+        // when not in sync, more 1's than 0's are detected and this slips in time.
       if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
          if( digitalRead(WWVB_OUT) == 0 ){  
-            ++late;               // sampling late
+            ++late;                    // sampling late
             wwvb_clk -= dither;        // adjust sample to earlier
          }
          else{
-            ++early;              // need to sample later
+            ++early;                   // need to sample later
             wwvb_clk += dither;        // longer clock ( more of these as arduino runs fast )
          }
       }
@@ -318,17 +322,6 @@ static uint8_t dither = 4;   // quick sync
         wwvb_errors <<= 1; wwvb_errors |= e;
         if( e ) ++errors;
 
-        if( wwvb_quiet < 30 ){   // - debug print out some stats when not in CAT mode
-           if( ++secs == 60 ){
-               Serial.print("Errors "); Serial.print(errors);
-               Serial.print("  Early "); Serial.print(early);
-               Serial.print("  Late ");  Serial.print(late);
-               print_stats();
-               Serial.print("  Decodes "); Serial.println(decodes);
-               dither = ( errors > 30 ) ? 4 : 1;
-               early = late = secs = errors = 0;
-           }
-        }
         // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
         // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
         // wwvb_sync &= 0x0fffffffffffffff;   // mask off the old bits from previous minute
@@ -338,12 +331,31 @@ static uint8_t dither = 4;   // quick sync
         if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
           if( wwvb_errors == 0 ){    // decode on no bit errors
             wwvb_decode();
-            ++decodes;
           }
         }
-      }    
-   }
-  }
+
+        if( ++secs == 60 ){              //  adjust dither each minute
+           if( wwvb_quiet == 1 ){        // debug print out some stats when in test mode,
+               Serial.print("Errors "); Serial.print(errors);
+               Serial.print("  Early "); Serial.print(early);
+               Serial.print("  Late ");  Serial.print(late);
+               print_stats();
+            //   Serial.print(" Tm Correction ");
+            //      if( tm_correction == 0 ) Serial.print(0);
+            //      else{
+            //        if( tm_correction < 0 ) Serial.write('-');
+            //        Serial.print(tm_correct_count);
+            //      }
+               Serial.println();
+           }
+           
+           dither = ( errors >> 4 ) + 1;
+           early = late = secs = errors = 0;
+        }
+
+      }  // end decode time    
+    }    // end integration timer
+  }      // loops - repeat for lost milliseconds - I2C issue probably
 }
 
 void gather_stats( uint8_t data ){
@@ -378,11 +390,6 @@ uint8_t hr;
 uint8_t mn;
 uint8_t dy;
 
-  // can set frame_sec to correct value here( 0 or 60 depending if odd or even minute )
-  // if decode an odd minute, that is the start of the frame since the decoded minute is the previous one
-  // !!! should zero the milli counter also which is currently a static, need global
-  // can keep a count of how long it takes to gain or loose and adjust
-  // the value of the 27 mhz clock
 
   tmp = ( wwvb_data >>( 59 - 53) ) & 0x1ff;
   yr = 0;
@@ -416,22 +423,42 @@ uint8_t dy;
   mn += tmp & 0xf;
 
   // sync the frame timer to wwvb, don't change time at the start or end of the frame or
-  // may skip frames or repeat frames
+  // may skip frames or repeat frames.
+  // There is jitter in the actual time depending upon how good the wwvb signal is.
+  // typical jitter is maybe 10ms when signals are good
+  tmp = frame_msec;         // capture milliseconds value before it is corrected
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
-    if( frame_sec > 20 && frame_sec < 100 ){   // just in case there was a bit error in the minute field
-      frame_sec = 60;
-      frame_msec = 0;
-    }  
+    
+    //  if( operate_mode == FRAME_MODE ){   // test mode will print jitter without corrections to time
+    //     frame_sec = 60;                 // test mode is CAT_MODE with wwvb_quiet == 1
+    //     frame_msec = 0;
+    //  } 
+         
+           // add or sub 1 hz from the master clock.  Value 100 is 1 hz.
+           if( frame_sec != 60 || ( frame_sec == 60 && frame_msec > 20 ) ){   // allow some jitter deadband
+              if( frame_sec < 60 ) clock_freq -= 100;  // this should trend to the correct value
+              else clock_freq += 100;                  // but may toggle because of the jitter
+              // !!! signs correct?, can set clock_freq way off and see if it goes in the correct direction
+              // set new frequency's
+              si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
+              si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
+              frame_sec = 60;
+              frame_msec = 10;                         // guess at code delay and normal jitter 
+           }
+          
+  }
+  
+  if( wwvb_quiet == 1 ){    // avoid printing on the serial port when in CAT mode or FRAME mode
+     Serial.print("WWVB ");  Serial.print(tmp);   // show jitter
+     Serial.print(" 20");                        // the year 2100 bug
+     Serial.print( yr );  Serial.write(' ');
+     Serial.print( dy );  Serial.write(' ');
+     Serial.print( hr );  Serial.write(':');
+     if( mn < 10 ) Serial.write('0');
+     Serial.print(mn);   Serial.write(' ');
+     Serial.println((unsigned long)( clock_freq / 100LL) );
   }
 
-  if( wwvb_quiet > 30 ) return;    // avoid printing on the serial port, interfers with radio_control
-  Serial.print(frame_sec);  Serial.write(' ');
-  Serial.print("WWVB SYNC   ");
-  Serial.print("20");  // the year 2100 bug
-  Serial.print( yr );  Serial.write(' ');
-  Serial.print( dy );  Serial.write(' ');
-  Serial.print( hr );  Serial.write(':');
-  Serial.println(mn);
 }
 
 
@@ -486,7 +513,7 @@ static int time_adjust;
         if( ++slot >= 7 ) slot = 0;   // 10 slots is a 20 minute frame
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
       }
-      if( frame_sec == 118 && operate_mode == FRAME_MODE ) cal_enable = 1;   // do once per slot in wspr quiet time
+      if( frame_sec == 116 ) cal_enable = 1;   // do once per slot in wspr quiet time
    } 
 }
 
@@ -652,7 +679,7 @@ int done;
     if( cmd == '?' ){
       get_cmd();
       operate_mode = CAT_MODE;   // switch modes on query cat command
-      if( wwvb_quiet < 40 ) ++wwvb_quiet;  // allow some manual CAT commands before shutting off wwvb debug
+      if( wwvb_quiet < 2 ) ++wwvb_quiet;  // allow 1 manual CAT commands before shutting off wwvb debug
     }
     if( cmd == '*' )  set_cmd();
     if( cmd == '#' )  pnd_cmd(); 
