@@ -43,7 +43,7 @@
   // we are using the post dividers and can receive down to 40khz
   // vco 600 to 900
   
-uint64_t clock_freq = 2700452200;    // * 100 to enable setting fractional frequency
+uint64_t clock_freq = 2700446600;  //2700452200;    // * 100 to enable setting fractional frequency
 uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
@@ -115,6 +115,13 @@ uint8_t wwvb_last_err;   // display last error character received ( will show wh
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
+
+// long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
+// drift in the time keeping.
+#define FF  -4   //  precalculated constant offset, -14?
+int cal_ff;      // calibrate fudge factor
+int cal_vals[16];
+uint8_t cal_i;
 
 /***************************************************************************/
 
@@ -287,7 +294,7 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
    if( digitalRead(WWVB_OUT) == LOW ) ++wwvb_sum;
 
    if( --wwvb_clk == 0 ){    // end of period, dump integrator
-      b = ( wwvb_sum > 50 ) ? 0 : 128;
+      b = ( wwvb_sum > (counts[wwvb_count] >> 1) ) ? 0 : 128;
       wwvb_tmp >>= 1;
       wwvb_tmp |= b;
       wwvb_sum = 0;
@@ -312,24 +319,15 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
          }
       }
       
-
-
         // decode
         // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
         b = 0;  s = 0;  e = 1;   // assume it is an error
-
-        // strict decode works well
-        if( wwvb_tmp == 0xfc ) e = 0, b = 0;
-        if( wwvb_tmp == 0xf0 ) e = 0, b = 1;
-        if( wwvb_tmp == 0xc0 ) e = 0, s = 1;
-
-        // try a loose decode and see if get bit errors in the decoded text.  Yes there were bit errors.
-        // Of the two bits in each position, detect if at least one of them is correct
-         // if( (wwvb_tmp & 0x3) != 0x3 ) e = 0, b = 0;  // at least one bit low in the zero position
-         //if( (wwvb_tmp & 0xc) != 0xc && e == 0 ) e = 0, b = 1;  // at least one bit low for 1's and 0's
-         // if( (wwvb_tmp & 0x30) != 0x30 && b == 1 ) e = 0, s = 1;  // a low bit in all 3 positions
-         // if( (wwvb_tmp & 0xc0) == 0 ) e = 1, s = 0;    // both stop bits are zero, error.
         
+        // strict decode works well, added some loose decode for common bit errors
+        if( wwvb_tmp == 0xfc || wwvb_tmp == 0xfd || wwvb_tmp == 0xfe ) e = 0, b = 0;
+        if( wwvb_tmp == 0xf0 || wwvb_tmp == 0xf1 ) e = 0, b = 1;
+        if( wwvb_tmp == 0xc0 || wwvb_tmp == 0xc1 ) e = 0, s = 1;
+
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
         wwvb_errors <<= 1; wwvb_errors |= e;  // errors
@@ -348,15 +346,22 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
           }
         }
 
-        if( ++secs == 60 ){              //  adjust dither each minute
-           if( wwvb_quiet == 1 ){        // debug print out some stats when in test mode
-               Serial.print("Tm ");       Serial.print(frame_msec);
-               Serial.print("  Errors "); Serial.print(errors);
-               Serial.print("  Early ");  Serial.print(early);
-               Serial.print("  Late ");   Serial.print(late);
-               print_stats();
+        if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
+                // debug print out some stats when in test mode, delay printing during calibrate time
+           if( errors < 40 ) frame_sync(frame_msec);  //  30 or 40, 50 = test
+           else frame_sync(-1);
+           
+           if( wwvb_quiet == 1 && errors != 0){       
+               Serial.print("Tm "); Serial.print(frame_msec);
+               Serial.print("  Err "); Serial.print(errors);
+               Serial.print("  Clk ");  Serial.print(early);
+               Serial.print(',');   Serial.print(late);
+               print_stats(1);
+               Serial.print(" FF ");  Serial.print(cal_ff);
                Serial.println();
-           }           
+           }
+           else print_stats(0);
+                      
            dither = ( errors >> 4 ) + 1;
            early = late = secs = errors = 0;   // reset the stats for the next minute
         }
@@ -379,36 +384,44 @@ uint8_t i;
 }
 
 
-void print_stats(){
+void print_stats(uint8_t prnt){
 uint8_t i;
 
-   Serial.print("  Data ");     // when in sync with WWVB, will see a display such as 11XXxx00
-   for( i = 7;  i < 8; --i ){
-      if( wwvb_stats[i] > 50 ) Serial.write('1');
-      else if( wwvb_stats[i] < 10 ) Serial.write('0');
-      else if( wwvb_stats[i] > 30 ) Serial.write('X');
-      else Serial.write('x');
-      wwvb_stats[i] = 0;
-   }
+   if( prnt ){                // ones and zeros distribution
+      Serial.print("  ");     // when in sync with WWVB, will see a display such as 11XXxx00
+      for( i = 7;  i < 8; --i ){
+         if( wwvb_stats[i] > 50 ) Serial.write('1');
+         else if( wwvb_stats[i] < 10 ) Serial.write('0');
+         else if( wwvb_stats[i] > 30 ) Serial.write('X');
+         else Serial.write('x');
+      //   wwvb_stats[i] = 0;
+      }
 
-   Serial.write(' ');           // print binary with leading zero's
-   for( i = 7; i < 8; --i ){
-      if( wwvb_last_err & 0x80 ) Serial.write('1');
-      else Serial.write('0');
-      wwvb_last_err <<= 1;
+     // Serial.write(' ');           // print binary with leading zero's, example failing data
+     // for( i = 7; i < 8; --i ){
+     //    if( wwvb_last_err & 0x80 ) Serial.write('1');
+     //    else Serial.write('0');
+     //    wwvb_last_err <<= 1;
+     // }
    }
+ 
+   for( i = 0; i < 8; ++i ) wwvb_stats[i] = 0;
+ 
 }
 
 
 
 void wwvb_decode(){   // WWVB transmits the data for the previous minute just ended
 uint16_t tmp;
+uint8_t tmp2;
 uint8_t yr;
 uint8_t hr;
 uint8_t mn;
 uint8_t dy;
+static unsigned int decodes;
+uint8_t i;
 
-
+  ++decodes;
   tmp = ( wwvb_data >>( 59 - 53) ) & 0x1ff;
   yr = 0;
   if( tmp & 0x100 ) yr += 80;
@@ -444,31 +457,40 @@ uint8_t dy;
   // may skip frames or repeat frames.
   // There is jitter in the actual time depending upon how good the wwvb signal is.
   // typical jitter is maybe 2 to 10ms when signals are good
+  tmp2 = frame_sec;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
          
        // add or sub 1 hz from the master clock.  Value 100 is 1 hz.
        // !!! todo check that this converges to the correct 27 mhz freq rather than diverges
-       if( frame_sec != 60 || ( frame_sec == 60 && frame_msec > 40 ) ){   // allow 20ms jitter deadband
-          if( frame_sec < 60 ) clock_freq -= 100;  // this should trend to the correct value
-          else clock_freq += 100;                  // but may toggle because of the jitter
-          si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
-          si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
-          frame_sec = 60;
-          frame_msec = 20;                         // a guess at code delay and normal jitter 
-       }
-          
+     //  if( frame_sec != 60 || ( frame_msec < 480 || frame_msec > 520 ) ){   // allow 20ms jitter deadband
+
+        // wait on this until we get the time to not trend slow or fast
+        // the 27mhz is used as a reference to correct the Arduino 16mhz timing error
+        // this routine is correcting any residual timing error, can it also correct the 27 mhz reference?
+        // Or would it just introduce the 16mhz instability into the 27mhz reference?
+         // if( frame_sec < 61 ) clock_freq -= 100;  // this should trend to the correct value
+         // else clock_freq += 100;                  // but may toggle because of the jitter
+         // si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
+         // si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
+          frame_sec = 60;                            // set seconds to the correct time
+          frame_msec = 0; 
+          for( i = 0; i < 16; ++i ) cal_vals[i] = 0;
+     //  }
+
   }
   
   if( wwvb_quiet == 1 ){    // wwvb logging mode
-     Serial.print("WWVB ");  Serial.print(tmp);   // show jitter
-     Serial.print(" 20");                        // the year 2100 bug
+     Serial.print(decodes);
+     Serial.write(' ');  Serial.print(tmp2); Serial.write('.'); Serial.print(tmp);   // show jitter
+     Serial.print(" WWVB "); 
+     Serial.print("20");                        // the year 2100 bug
      Serial.print( yr );  Serial.write(' ');
      Serial.print( dy );  Serial.write(' ');
      Serial.print( hr );  Serial.write(':');
      if( mn < 10 ) Serial.write('0');
-     Serial.print(mn);   Serial.write(' ');
-     Serial.println((unsigned long)( clock_freq / 100LL) );
+     Serial.println(mn);  // Serial.write(' ');
+    // Serial.print((unsigned long)( clock_freq / 100LL) );
   }
 
 }
@@ -482,7 +504,7 @@ uint8_t dy;
 // this seems to be working very well with no change in WSPR received delta time for over 48 hours.
 void run_cal(){    // count pulses on clock 2 wired to pin 5
                    // IMPORTANT: jumper W4 to W7 on the arduino shield
-unsigned long result;
+long result;
 long error;
 
 
@@ -492,7 +514,7 @@ long error;
    }
 
    if( FreqCount.available() ){
-       result = FreqCount.read();
+       result = (long)FreqCount.read() + (long)(cal_ff + FF);
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
@@ -504,6 +526,40 @@ long error;
        FreqCount.end();
        cal_enable = 0;
    }  
+}
+
+// adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
+// wwvb signal.
+void frame_sync(int new_val){   // add new to a history average value and adjust the fudge factor
+int t;
+static uint8_t mod;
+         
+     for(t = 0; t < 16; ++t){                  // leak values to zero
+        if( cal_vals[t] > 0 ) cal_vals[t] -= 1;
+        if( cal_vals[t] < 0 ) cal_vals[t] += 1;
+     }
+
+     // no signal.  Out of lock.
+     if( new_val == -1 ){      // clear out the stale data slowly.
+        ++mod;   mod&= 3;
+        if( mod == 0 ){
+           cal_vals[cal_i++] = 0;
+           cal_i &= 15;
+        }
+     }
+     else{
+        if( new_val > 500 ) new_val = new_val - 1000;
+        if( new_val > -20 && new_val < 20 ) new_val = 0;    // +-20 deadband
+        cal_vals[cal_i++] = new_val;
+        cal_i &= 15;
+     }
+     
+     new_val = 0;
+     for(t = 0; t < 16; ++t ) new_val += cal_vals[t];
+     new_val >>= 3;         // add 16 values, divide by 8 is a mult by 2
+
+     cal_ff = -new_val;     // bend the calibration to move the timing
+       
 }
 
 void frame_timer( unsigned long t ){   
@@ -550,6 +606,12 @@ static uint8_t mod;
       tx_off();
       i = 0;                 // setup for next time to begin at zero index
       wspr_tx_cancel = wspr_tx_enable = 0;    // flag done
+      return;
+   }
+
+   // delay 3 baud to start at approx 2 seconds later
+   if( wspr_tx_enable < 4 ){
+      ++wspr_tx_enable;
       return;
    }
    // set the frequency
@@ -792,7 +854,8 @@ int len;
     break;
     case 'C':      // transmitting status 
        stage(0);
-       stage(wspr_tx_enable);
+       if( wspr_tx_enable ) stage(1);
+       else stage(0);
     break;
     case 'K':   /* wpm on noise blanker slider */
        stage( 15 - 10 );
