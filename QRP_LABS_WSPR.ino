@@ -16,8 +16,6 @@
 //   R dividers in the SI5351.  Dividers 1 - rx and 4 - tx will cover 1mhz to 30mhz
 //   Dividers 16 - rx and 64 - tx will cover 40 khz to 2 mhz
 
- 
-#include <Wire.h>
 #include <FreqCount.h>   // one UNO I have does not work correctly with this library, another one does
 #include <EEPROM.h>
 
@@ -117,8 +115,8 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
-// drift in the time keeping.
-#define FF  -4   //  precalculated constant offset, -14?
+// drift in the time keeping.                       lose      gain
+#define FF  -7   //  precalculated constant offset, -14  -9 |  -4
 int cal_ff;      // calibrate fudge factor
 int cal_vals[16];
 uint8_t cal_i;
@@ -160,8 +158,7 @@ void setup() {
 uint8_t i;
   
   Serial.begin(1200);      // TenTec Argo V baud rate
-  Wire.begin();
-// Wire.setClock(400000);  // should work but clock 1 starts on the wrong frequency
+  i2init();
 
   ee_restore();            // get default freq for frame mode from eeprom
 
@@ -261,6 +258,7 @@ void loop() {
 static unsigned long ms;
 
    if( Serial.availableForWrite() > 20 ) radio_control();
+   i2poll();
    
    if( ms != millis()){     // run once each ms
        ms = millis();
@@ -473,9 +471,13 @@ uint8_t i;
          // else clock_freq += 100;                  // but may toggle because of the jitter
          // si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
          // si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
-          frame_sec = 60;                            // set seconds to the correct time
-          frame_msec = 0; 
-          for( i = 0; i < 16; ++i ) cal_vals[i] = 0;
+         if( frame_sec == 59 && frame_msec >= 500 ) ;       // let it float
+         else if( frame_sec == 60 && frame_msec < 500 ) ;   // let it ride
+         else{                                              // way off, reset to the correct time
+            frame_sec = 60;
+            frame_msec = 0; 
+            for( i = 0; i < 16; ++i ) cal_vals[i] = 0;
+         }
      //  }
 
   }
@@ -641,10 +643,11 @@ void tx_off(){
 void i2cd( unsigned char addr, unsigned char reg, unsigned char dat ){
   // direct register writes.  A possible speed up could be realized if one were
   // to use the auto register inc feature of the SI5351
-   Wire.beginTransmission(addr);
-   Wire.write(reg);
-   Wire.write(dat);
-   Wire.endTransmission();
+
+   i2start(addr);
+   i2send(reg);
+   i2send(dat);
+   i2stop();
 }
 
 
@@ -936,5 +939,113 @@ char cmd2;
 
 }
 
+/***** non-blocking, write only, I2C  functions   ******/
+
+#define I2BUFSIZE  64
+int i2buf[I2BUFSIZE];
+uint8_t i2in, i2out;
+
+// use some upper bits in the buffer for control
+#define ISTART 0x100
+#define ISTOP  0x200
+
+void i2init()
+{
+  TWBR = 72;   //  12 400k for 16 meg clock.  72 100k   ((F_CPU/freq)-16)/2
+  TWSR = 0;
+  TWDR = 0xFF;
+  PRR = 0;
+}
+
+void i2start( unsigned char adr ){
+int dat;
+  // shift the address over and add the start flag
+  dat = ( adr << 1 ) | ISTART;
+  i2send( dat );
+}
+
+void i2send( int data ){   // just save stuff in the buffer
+uint8_t t;
+
+  // but check for space first
+  t = ( i2in + 1 ) & (I2BUFSIZE - 1);
+  while( t == i2out ) i2poll();        // wait for space
+  
+  i2buf[i2in++] = data;
+  i2in &= (I2BUFSIZE - 1);
+}
+
+void i2stop( ){
+   i2send( ISTOP );   // que a stop condition
+}
+
+/*
+void i2flush(){  // call poll to empty out the buffer. 
+
+  while( i2poll() ); 
+}
+*/
+
+uint8_t i2poll(){    // everything happens here.  Call this from loop.
+static uint8_t state = 0;
+static int data;
+static uint8_t delay_counter;
+
+ // the library code has a delay after loading the transmit buffer
+ // and before the status bits are tested for transmit active
+   if( delay_counter ){  
+     --delay_counter;
+     return (16 + delay_counter);
+   }
+   
+   switch( state ){    
+      case 0:      // idle state or between characters
+        if( i2in != i2out ){   // get next character
+           data = i2buf[i2out++];
+           i2out &= (I2BUFSIZE - 1 );
+           
+           if( data & ISTART ){   // start
+              data &= 0xff;
+              // set start condition
+              TWCR = (1<<TWINT) | (1<<TWSTA) | (1<<TWEN);
+              state = 1; 
+           }
+           else if( data & ISTOP ){  // stop
+              // set stop condition
+              TWCR = (1<<TWINT) | (1<<TWEN) | (1<<TWSTO);
+              state = 3;
+           }
+           else{   // just data to send
+              TWDR = data;
+              TWCR = (1<<TWINT) | (1<<TWEN);
+              delay_counter = 10;   // delay for transmit active to come true
+              state = 2;
+           }
+        }
+      break; 
+      case 1:  // wait for start to clear, send saved data which has the address
+         if( (TWCR & (1<<TWINT)) ){
+            state = 2;
+            TWDR = data;
+            TWCR = (1<<TWINT) | (1<<TWEN);
+            delay_counter = 10;
+         }
+      break;
+      case 2:  // wait for ack/nack done and tbuffer empty, blind to success or fail
+         if( (TWCR & (1<<TWINT)) ){  
+            state = 0;
+         }
+      break;
+      case 3:  // wait for stop to clear
+         if( (TWCR & (1<<TWSTO)) == 0 ){
+            state = 0;
+            delay_counter = 10;  // a little delay at the end of a sequence
+         }
+      break;    
+   }
+
+   if( i2in != i2out ) return (state + 8);
+   else return state;
+}
 
 
