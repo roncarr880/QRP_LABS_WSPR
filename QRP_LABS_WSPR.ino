@@ -46,7 +46,7 @@ uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1528;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1500;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
@@ -115,8 +115,8 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
-// drift in the time keeping.                       lose      gain
-#define FF  -7   //  precalculated constant offset, -14  -9 |  -4
+// drift in the time keeping.                       lose       |  gain
+#define FF  -6   //  precalculated constant offset, -14  -9 -7 |  -4
 int cal_ff;      // calibrate fudge factor
 int cal_vals[16];
 uint8_t cal_i;
@@ -356,6 +356,7 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
                Serial.print(',');   Serial.print(late);
                print_stats(1);
                Serial.print(" FF ");  Serial.print(cal_ff);
+               Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
                Serial.println();
            }
            else print_stats(0);
@@ -451,35 +452,17 @@ uint8_t i;
   if( tmp & 0x20 ) mn += 10;
   mn += tmp & 0xf;
 
-  // sync the frame timer to wwvb, don't change time at the start or end of the frame or
-  // may skip frames or repeat frames.
-  // There is jitter in the actual time depending upon how good the wwvb signal is.
-  // typical jitter is maybe 2 to 10ms when signals are good
   tmp2 = frame_sec;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
          
-       // add or sub 1 hz from the master clock.  Value 100 is 1 hz.
-       // !!! todo check that this converges to the correct 27 mhz freq rather than diverges
-     //  if( frame_sec != 60 || ( frame_msec < 480 || frame_msec > 520 ) ){   // allow 20ms jitter deadband
-
-        // wait on this until we get the time to not trend slow or fast
-        // the 27mhz is used as a reference to correct the Arduino 16mhz timing error
-        // this routine is correcting any residual timing error, can it also correct the 27 mhz reference?
-        // Or would it just introduce the 16mhz instability into the 27mhz reference?
-         // if( frame_sec < 61 ) clock_freq -= 100;  // this should trend to the correct value
-         // else clock_freq += 100;                  // but may toggle because of the jitter
-         // si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
-         // si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
-         if( frame_sec == 59 && frame_msec >= 500 ) ;       // let it float
-         else if( frame_sec == 60 && frame_msec < 500 ) ;   // let it ride
+         if( frame_sec == 59 && frame_msec >= 500 ) ;       // let it ride
+         else if( frame_sec == 60 && frame_msec < 500 ) ;   // let it slide
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0; 
             for( i = 0; i < 16; ++i ) cal_vals[i] = 0;
          }
-     //  }
-
   }
   
   if( wwvb_quiet == 1 ){    // wwvb logging mode
@@ -551,9 +534,10 @@ static uint8_t mod;
      }
      else{
         if( new_val > 500 ) new_val = new_val - 1000;
-        if( new_val > -20 && new_val < 20 ) new_val = 0;    // +-20 deadband
+        if( new_val > -20 && new_val < 20 ) new_val = 0;    // +- deadband for jitter
         cal_vals[cal_i++] = new_val;
         cal_i &= 15;
+        clock_correction( new_val );
      }
      
      new_val = 0;
@@ -562,6 +546,27 @@ static uint8_t mod;
 
      cal_ff = -new_val;     // bend the calibration to move the timing
        
+}
+
+void clock_correction( int val ){    // long term trend correction to the master clock freq
+static int time_trend;               // a change of +-100 is 1hz change
+uint8_t changed;
+
+    if( wspr_tx_enable ) return;   // ignore this when transmitting
+    
+    changed = 0;
+    time_trend += val;
+    if( time_trend > 600 ) clock_freq -= 100, changed = 1;   // !!! sign correct on +-100 ?
+    if( time_trend < -600 ) clock_freq += 100, changed = 1;
+    
+    if( changed ){    // set new dividers for the new master clock freq value to take effect
+       time_trend = 0;
+       if( clock_freq > 2700452200ULL ) clock_freq -= 100;   // stay within some bounds
+       if( clock_freq < 2700441000ULL ) clock_freq += 100;
+       si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
+       si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
+    }
+
 }
 
 void frame_timer( unsigned long t ){   
@@ -594,12 +599,19 @@ void wspr_tx( unsigned long t ){
 static int i;
 static unsigned long timer;
 static uint8_t mod;
+static unsigned int one_second;
+
+   // delay one second before starting transmission, this function is called once per millisecond
+   if( one_second < 1000 && wspr_tx_cancel == 0 ){
+      ++one_second;
+      return;
+   }
 
    if( wspr_tx_cancel ){      // quit early or just the end of the message
       if( i < 160 ) i = 162;  // let finish if near the end, else force done
    }
    
-   if( i != 0 && (t - timer) < 683 ) return;   // baud time is 682.66666666 ms
+   if( (t - timer) < 683 ) return;   // baud time is 682.66666666 ms
    timer = t;
    ++mod;   mod &= 3;
    if( mod == 0 ) ++timer;    // delay 683, 683, 682, etc.
@@ -608,14 +620,10 @@ static uint8_t mod;
       tx_off();
       i = 0;                 // setup for next time to begin at zero index
       wspr_tx_cancel = wspr_tx_enable = 0;    // flag done
+      one_second = 0;
       return;
    }
 
-   // delay 3 baud to start at approx 2 seconds later
-   if( wspr_tx_enable < 4 ){
-      ++wspr_tx_enable;
-      return;
-   }
    // set the frequency
    si_pll_x(PLLA,Rdiv*4*(freq+audio_freq),divider,Rdiv*4*146*wspr_msg[i]);
    if( i == 0 ) tx_on();
@@ -632,6 +640,7 @@ void tx_on(){
 void tx_off(){
   
     i2cd(SI5351,3,0xff ^ (CLK1_EN + CLK2_EN) );   // turn off tx, turn on rx and cal clocks
+    i2flush();                                    // wait for tx off to complete before enabling the rx
     si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
     digitalWrite(MUTE,LOW);                       // enable receiver
     digitalWrite(WWVB_PWDN,LOW);                  // enable wwvb receiver
@@ -979,12 +988,12 @@ void i2stop( ){
    i2send( ISTOP );   // que a stop condition
 }
 
-/*
+
 void i2flush(){  // call poll to empty out the buffer. 
 
   while( i2poll() ); 
 }
-*/
+
 
 uint8_t i2poll(){    // everything happens here.  Call this from loop.
 static uint8_t state = 0;
