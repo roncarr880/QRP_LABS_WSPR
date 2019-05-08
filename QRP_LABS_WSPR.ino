@@ -421,47 +421,23 @@ static unsigned int decodes;
 uint8_t i;
 
   ++decodes;
-  tmp = ( wwvb_data >>( 59 - 53) ) & 0x1ff;
-  yr = 0;
-  if( tmp & 0x100 ) yr += 80;
-  if( tmp & 0x80 ) yr += 40;
-  if( tmp & 0x40 ) yr += 20;
-  if( tmp & 0x20 ) yr += 10;
-  yr += tmp & 0xf;
 
-  tmp = ( wwvb_data >> ( 59 - 33 ) ) & 0xfff;
-  dy = 0;
-  if( tmp & 0x800 ) dy += 200;     // day of the year, 0 to 366
-  if( tmp & 0x400 ) dy += 100;     // to print Months and days, would need to get the leap year bits
-  if( tmp & 0x100 ) dy += 80;      // and make up a calendar
-  if( tmp & 0x80 ) dy += 40;
-  if( tmp & 0x40 ) dy += 20;
-  if( tmp & 0x20 ) dy += 10;
-  dy += tmp & 0xf;
-
-  tmp = ( wwvb_data >> ( 59 - 18 ) ) & 0x3f;
-  hr = 0;
-  if( tmp & 0x40 ) hr += 20;
-  if( tmp & 0x20 ) hr += 10;
-  hr += tmp & 0xf;
-
-  tmp = ( wwvb_data >> ( 59 - 8 ) ) & 0xff;
-  mn = 0;
-  if( tmp & 0x80 ) mn += 40;
-  if( tmp & 0x40 ) mn += 20;
-  if( tmp & 0x20 ) mn += 10;
-  mn += tmp & 0xf;
+  yr = wwvb_decode2( 53, 0x1ff );   // year is 0 to 99
+  dy = wwvb_decode2( 33, 0xfff );   // day is 0 to 365
+  hr = wwvb_decode2( 18, 0x3f );
+  mn = wwvb_decode2( 8, 0xff );
 
   tmp2 = frame_sec;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
          
-         if( frame_sec == 59 && frame_msec >= 500 ) ;       // let it ride
-         else if( frame_sec == 60 && frame_msec < 500 ) ;   // let it slide
+         if( frame_sec == 59 && frame_msec > 600 ) ;        // let it ride
+         else if( frame_sec == 60 && frame_msec < 400 ) ;   // let it slide
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0; 
             for( i = 0; i < 16; ++i ) cal_vals[i] = 0;
+            clock_freq = 2700446600;                        // lost sync so this may be incorrect also
          }
   }
   
@@ -480,7 +456,24 @@ uint8_t i;
 
 }
 
+// wwvb fields decode about the same way
+uint8_t wwvb_decode2( uint8_t pos, uint16_t mask ){ 
+uint16_t tmp;
+uint8_t val;
 
+  tmp = ( wwvb_data >> ( 59 - pos ) ) & mask;
+  val = 0;
+  if( tmp & 0x800 ) val += 200;
+  if( tmp & 0x400 ) val += 100;
+  if( tmp & 0x100 ) val += 80;
+  if( tmp & 0x80 ) val += 40;
+  if( tmp & 0x40 ) val += 20;
+  if( tmp & 0x20 ) val += 10;
+  val += tmp & 0xf;
+
+  return val;
+  
+}
 
 // the original idea was to correct the 27 mhz clock using the UNO 16 mhz clock as a reference.
 // calibrating the SI5351 against the 16mhz clock does not seem to be viable.
@@ -555,14 +548,14 @@ uint8_t changed;
     if( wspr_tx_enable ) return;   // ignore this when transmitting
     
     changed = 0;
-    time_trend += val;
-    if( time_trend > 600 ) clock_freq -= 100, changed = 1;   // !!! sign correct on +-100 ?
+    time_trend -= val;             // val is the inverse of reported FF
+    if( time_trend > 600 ) clock_freq -= 100, changed = 1;
     if( time_trend < -600 ) clock_freq += 100, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
-       if( clock_freq > 2700452200ULL ) clock_freq -= 100;   // stay within some bounds
-       if( clock_freq < 2700441000ULL ) clock_freq += 100;
+       if( clock_freq > 2700486600ULL ) clock_freq -= 100;   // stay within some bounds
+       if( clock_freq < 2700406600ULL ) clock_freq += 100;
        si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
     }
