@@ -116,7 +116,7 @@ int frame_msec;
 
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.                       lose       |  gain
-#define FF  -6   //  precalculated constant offset, -14  -9 -7 |  -4
+#define FF  -7   //  precalculated constant offset, -14  -9 -7 | -6 -5 -4
 int cal_ff;      // calibrate fudge factor
 int cal_vals[16];
 uint8_t cal_i;
@@ -346,8 +346,8 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
 
         if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
                 // debug print out some stats when in test mode, delay printing during calibrate time
-           if( errors < 40 ) frame_sync(frame_msec);  //  30 or 40, 50 = test
-           else frame_sync(-1);
+           if( errors < 40 ) frame_sync(frame_msec,errors);  // apply time fudge factor when some signal detected
+           else frame_sync(-1,errors);
            
            if( wwvb_quiet == 1 && errors != 0){       
                Serial.print("Tm "); Serial.print(frame_msec);
@@ -431,8 +431,8 @@ uint8_t i;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
          
-         if( frame_sec == 59 && frame_msec > 600 ) ;        // let it ride
-         else if( frame_sec == 60 && frame_msec < 400 ) ;   // let it slide
+         if( frame_sec == 59 && frame_msec >= 500 ) ;       // let it ride
+         else if( frame_sec == 60 && frame_msec < 500 ) ;   // let it slide
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0; 
@@ -508,10 +508,12 @@ long error;
 
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
-void frame_sync(int new_val){   // add new to a history average value and adjust the fudge factor
-int t;
+void frame_sync(int new_val, uint8_t err){   // add new to a history average value and adjust the fudge factor
+int t, limit;
 static uint8_t mod;
-         
+
+     limit = (err > 5) ? 2*err : 10;           // wider dead zone for larger error number
+                                               // max deadband is +- 100 ms    
      for(t = 0; t < 16; ++t){                  // leak values to zero
         if( cal_vals[t] > 0 ) cal_vals[t] -= 1;
         if( cal_vals[t] < 0 ) cal_vals[t] += 1;
@@ -527,13 +529,16 @@ static uint8_t mod;
      }
      else{
         if( new_val > 500 ) new_val = new_val - 1000;
-        if( new_val > -20 && new_val < 20 ) new_val = 0;    // +- deadband for jitter
+        if( new_val > -limit && new_val < limit ) new_val = 0;    // +- deadband for jitter
+        // subtract out the deadband from the time value
+        if( new_val > 0 ) new_val -= limit;
+        if( new_val < 0 ) new_val += limit;
         cal_vals[cal_i++] = new_val;
         cal_i &= 15;
         clock_correction( new_val );
      }
      
-     new_val = 0;
+     new_val = 0;           // average past 16 values
      for(t = 0; t < 16; ++t ) new_val += cal_vals[t];
      new_val >>= 3;         // add 16 values, divide by 8 is a mult by 2
 
