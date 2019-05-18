@@ -41,7 +41,7 @@
   // we are using the post dividers and can receive down to 40khz
   // vco 600 to 900
   
-uint64_t clock_freq = 2700446600;  //2700452200;    // * 100 to enable setting fractional frequency
+uint64_t clock_freq = 2700446600;    // * 100 to enable setting fractional frequency
 uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
@@ -346,8 +346,8 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
 
         if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
                 // debug print out some stats when in test mode, delay printing during calibrate time
-           if( errors < 40 ) frame_sync(frame_msec,errors);  // apply time fudge factor when some signal detected
-           else frame_sync(-1,errors);
+           if( errors < 40 ) frame_sync(frame_msec);  // apply time fudge factor when some signal detected
+           else frame_sync(-1);
            
            if( wwvb_quiet == 1 && errors != 0){       
                Serial.print("Tm "); Serial.print(frame_msec);
@@ -508,12 +508,10 @@ long error;
 
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
-void frame_sync(int new_val, uint8_t err){   // add new to a history average value and adjust the fudge factor
-int t, limit;
+void frame_sync(int new_val){   // add new to a history average value and adjust the fudge factor
+int t;
 static uint8_t mod;
-
-     limit = (err > 5) ? 2*err : 10;           // wider dead zone for larger error number
-                                               // max deadband is +- 100 ms    
+   
      for(t = 0; t < 16; ++t){                  // leak values to zero
         if( cal_vals[t] > 0 ) cal_vals[t] -= 1;
         if( cal_vals[t] < 0 ) cal_vals[t] += 1;
@@ -529,10 +527,7 @@ static uint8_t mod;
      }
      else{
         if( new_val > 500 ) new_val = new_val - 1000;
-        if( new_val > -limit && new_val < limit ) new_val = 0;    // +- deadband for jitter
-        // subtract out the deadband from the time value
-        if( new_val > 0 ) new_val -= limit;
-        if( new_val < 0 ) new_val += limit;
+        if( new_val > -10 && new_val < 10 ) new_val = 0;    // +- deadband for jitter
         cal_vals[cal_i++] = new_val;
         cal_i &= 15;
         clock_correction( new_val );
