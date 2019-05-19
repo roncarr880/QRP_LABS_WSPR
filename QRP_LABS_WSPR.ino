@@ -345,10 +345,17 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
         }
 
         if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
-                // debug print out some stats when in test mode, delay printing during calibrate time
+
            if( errors < 40 ) frame_sync(frame_msec);  // apply time fudge factor when some signal detected
+           else if( errors < 50 ){                   // sometimes incorrect so limit the damage but still
+                                                     // use the 40 to 50 range to advantage
+              if( frame_msec < 950 && frame_msec > 500 ) frame_sync( 980 );   // small correction value
+              else if( frame_msec > 100 && frame_msec < 500 ) frame_sync( 20 ); // runs naturally high on weak 
+              else frame_sync(0);                                              // signal so larger deadzone
+           }                                                                  // than 500 to 950 signal
            else frame_sync(-1);
            
+                 // debug print out some stats when in test mode
            if( wwvb_quiet == 1 && errors != 0){       
                Serial.print("Tm "); Serial.print(frame_msec);
                Serial.print("  Err "); Serial.print(errors);
@@ -528,6 +535,9 @@ static uint8_t mod;
      else{
         if( new_val > 500 ) new_val = new_val - 1000;
         if( new_val > -10 && new_val < 10 ) new_val = 0;    // +- deadband for jitter
+        // sub out the deadzone value
+        if( new_val > 0 ) new_val -= 10;
+        if( new_val < 0 ) new_val += 10;
         cal_vals[cal_i++] = new_val;
         cal_i &= 15;
         clock_correction( new_val );
