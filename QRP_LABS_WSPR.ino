@@ -1,4 +1,6 @@
-
+// !!! note:  there is a loose connection somewhere in the headers or the jumper wires to the headers.  It will 
+//            hang in setup on I2C commands sometimes.  Maybe the clock or maybe the screw that contacts the USB 
+//            jack is keeping the boards too far apart.  Just a note for when it happens again.
 // QRP_LABS_WSPR
 //   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module, QRP Labs relay board.
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
@@ -115,8 +117,8 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
-// drift in the time keeping.                       lose       |  gain
-#define FF  -7   //  precalculated constant offset, -14  -9 -7 | -6 -5 -4
+// drift in the time keeping.                       lose       |  gain   when clock at 27...4466
+#define FF  -4   //  precalculated constant offset, -14  -9 -7 | -6 -5 -4
 int cal_ff;      // calibrate fudge factor
 int cal_vals[16];
 uint8_t cal_i;
@@ -201,7 +203,8 @@ uint8_t i;
   //  i2cd(SI5351,3,0xff ^ (CLK0_EN + CLK1_EN + CLK2_EN));   // testing only all on, remove tx PWR
 
   digitalWrite(band_info[band].pin,LOW);   // in case this turns out to be the correct relay
-  band_change();                           // select the correct relay
+  band_change();  // select the correct relay
+  //Serial.println(F("Starting..."));
 }
 
 uint8_t  band_change(){
@@ -347,7 +350,7 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
         if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
 
            if( errors < 40 ) frame_sync(frame_msec);  // apply time fudge factor when some signal detected
-           else if( errors < 50 ){                   // sometimes incorrect so limit the damage but still
+           else if( errors < 48 ){                   // sometimes incorrect so limit the damage but still
                                                      // use the 40 to 50 range to advantage
               if( frame_msec < 950 && frame_msec > 500 ) frame_sync( 980 );   // small correction value
               else if( frame_msec > 100 && frame_msec < 500 ) frame_sync( 20 ); // runs naturally high on weak 
