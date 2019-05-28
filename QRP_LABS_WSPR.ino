@@ -118,7 +118,7 @@ int frame_msec;
 
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.                       lose       |  gain   when clock at 27...4466
-#define FF  -4   //  precalculated constant offset, -14  -9 -7 | -6 -5 -4
+#define FF  -7   //  precalculated constant offset, -14  -9 -7 | -6 -5 -4
 int cal_ff;      // calibrate fudge factor
 int cal_vals[16];
 uint8_t cal_i;
@@ -429,6 +429,7 @@ uint8_t mn;
 uint8_t dy;
 static unsigned int decodes;
 uint8_t i;
+static uint64_t last_good = 2700446600;
 
   ++decodes;
 
@@ -440,14 +441,15 @@ uint8_t i;
   tmp2 = frame_sec;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
-         
-         if( frame_sec == 59 && frame_msec >= 500 ) ;       // let it ride
-         else if( frame_sec == 60 && frame_msec < 500 ) ;   // let it slide
+                            // only apply clock corrections in the middle of the two minute frame or may
+                            // otherwise mess up the frame timing
+         if( frame_sec == 59 && frame_msec >= 500 ) last_good = clock_freq;
+         else if( frame_sec == 60 && frame_msec < 500 ) last_good = clock_freq;
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0; 
-            for( i = 0; i < 16; ++i ) cal_vals[i] = 0;
-            clock_freq = 2700446600;                        // lost sync so this may be incorrect also
+            for( i = 0; i < 16; ++i ) cal_vals[i] = 0; 
+            clock_freq = last_good;   // lost sync, return to clock freq of last decode
          }
   }
   
