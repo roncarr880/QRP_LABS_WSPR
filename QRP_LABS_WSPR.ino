@@ -352,10 +352,10 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
            if( errors < 40 ) frame_sync(frame_msec);  // apply time fudge factor when some signal detected
            else if( errors < 48 ){                   // sometimes incorrect so limit the damage but still
                                                      // use the 40 to 50 range to advantage
-              if( frame_msec < 950 && frame_msec > 500 ) frame_sync( 980 );   // small correction value
-              else if( frame_msec > 100 && frame_msec < 500 ) frame_sync( 20 ); // runs naturally high on weak 
-              else frame_sync(0);                                              // signal so larger deadzone
-           }                                                                  // than 500 to 950 signal
+              if( frame_msec < 950 && frame_msec > 500 ) frame_sync( 980 );   // small correction value as
+              else if( frame_msec > 50 && frame_msec < 500 ) frame_sync( 20 ); // sometimes get incorrect
+              else frame_sync(0);                                              // time values 
+           }
            else frame_sync(-1);
            
                  // debug print out some stats when in test mode
@@ -564,8 +564,8 @@ uint8_t changed;
     
     changed = 0;
     time_trend -= val;             // val is the inverse of reported FF
-    if( time_trend > 600 ) clock_freq -= 100, changed = 1;
-    if( time_trend < -600 ) clock_freq += 100, changed = 1;
+    if( time_trend > 1000 ) clock_freq -= 10, changed = 1;
+    if( time_trend < -1000 ) clock_freq += 10, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
