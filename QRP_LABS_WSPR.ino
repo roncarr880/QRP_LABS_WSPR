@@ -117,11 +117,10 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
-// drift in the time keeping.                       lose       |  gain   when clock at 27...4466
-#define FF  -7   //  precalculated constant offset, -14  -9 -7 | -6 -5 -4
-int cal_ff;      // calibrate fudge factor
-int cal_vals[16];
-uint8_t cal_i;
+// drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
+//                                                      lose       |  gain   when clock at 27...4466
+#define FF  -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4
+
 
 /***************************************************************************/
 
@@ -349,23 +348,17 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
 
         if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
 
-           if( errors < 40 ) frame_sync(frame_msec);  // apply time fudge factor when some signal detected
-           else if( errors < 48 ){                   // sometimes incorrect so limit the damage but still
-                                                     // use the 40 to 50 range to advantage
-              if( frame_msec < 950 && frame_msec > 500 ) frame_sync( 980 );   // small correction value as
-              else if( frame_msec > 50 && frame_msec < 500 ) frame_sync( 20 ); // sometimes get incorrect
-              else frame_sync(0);                                              // time values 
-           }
-           else frame_sync(-1);
+           int tm = frame_sync( errors );
            
                  // debug print out some stats when in test mode
            if( wwvb_quiet == 1 && errors != 0){       
                Serial.print("Tm "); Serial.print(frame_msec);
+               Serial.write(','); Serial.print(tm);
                Serial.print("  Err "); Serial.print(errors);
                Serial.print("  Clk ");  Serial.print(early);
-               Serial.print(',');   Serial.print(late);
+               Serial.write(',');   Serial.print(late);
                print_stats(1);
-               Serial.print(" FF ");  Serial.print(cal_ff);
+               //Serial.print(" FF ");  Serial.print(cal_ff);
                Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
                Serial.println();
            }
@@ -447,8 +440,7 @@ static uint64_t last_good = 2700446600;
          else if( frame_sec == 60 && frame_msec < 500 ) last_good = clock_freq;
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
-            frame_msec = 0; 
-            for( i = 0; i < 16; ++i ) cal_vals[i] = 0; 
+            frame_msec = 0;  
             clock_freq = last_good;   // lost sync, return to clock freq of last decode
          }
   }
@@ -504,7 +496,7 @@ long error;
    }
 
    if( FreqCount.available() ){
-       result = (long)FreqCount.read() + (long)(cal_ff + FF);
+       result = (long)FreqCount.read() + (long)(FF);
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
@@ -520,52 +512,38 @@ long error;
 
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
-void frame_sync(int new_val){   // add new to a history average value and adjust the fudge factor
-int t;
-static uint8_t mod;
-   
-     for(t = 0; t < 16; ++t){                  // leak values to zero
-        if( cal_vals[t] > 0 ) cal_vals[t] -= 1;
-        if( cal_vals[t] < 0 ) cal_vals[t] += 1;
-     }
+int frame_sync(int err){
+int8_t t;
+static int last_time_error;
 
-     // no signal.  Out of lock.
-     if( new_val == -1 ){      // clear out the stale data slowly.
-        ++mod;   mod&= 3;
-        if( mod == 0 ){
-           cal_vals[cal_i++] = 0;
-           cal_i &= 15;
-        }
-     }
-     else{
-        if( new_val > 500 ) new_val = new_val - 1000;
-        if( new_val > -10 && new_val < 10 ) new_val = 0;    // +- deadband for jitter
-        // sub out the deadzone value
-        if( new_val > 0 ) new_val -= 10;
-        if( new_val < 0 ) new_val += 10;
-        cal_vals[cal_i++] = new_val;
-        cal_i &= 15;
-        clock_correction( new_val );
-     }
-     
-     new_val = 0;           // average past 16 values
-     for(t = 0; t < 16; ++t ) new_val += cal_vals[t];
-     new_val >>= 3;         // add 16 values, divide by 8 is a mult by 2
-
-     cal_ff = -new_val;     // bend the calibration to move the timing
-       
+       t = 0;
+       if( err < 46 ){     // test threshold for signal present or not
+           t = ( frame_msec < 500 ) ? -1 : 1 ;
+           last_time_error = ( frame_msec < 500 ) ? frame_msec : frame_msec - 1000 ;  // refresh correction amount
+           last_time_error += t;
+       }
+       if( frame_msec != 0 ){  // avoid making frame_msec less than zero
+           if( t == 0 ){       // use old data for the correction amount
+              if( last_time_error > 0 ) last_time_error--, t = -1;
+              if( last_time_error < 0 ) last_time_error++, t = 1;
+           }
+           frame_msec += t;
+       }
+       clock_correction( t );  // long term clock drift correction
+       return last_time_error;
 }
 
-void clock_correction( int val ){    // long term trend correction to the master clock freq
-static int time_trend;               // a change of +-100 is 1hz change
+
+void clock_correction( int8_t val ){    // long term trend correction to the master clock freq
+static int time_trend;                  // a change of +-100 is 1hz change
 uint8_t changed;
 
     if( wspr_tx_enable ) return;   // ignore this when transmitting
     
     changed = 0;
     time_trend -= val;             // val is the inverse of reported FF
-    if( time_trend > 1000 ) clock_freq -= 10, changed = 1;
-    if( time_trend < -1000 ) clock_freq += 10, changed = 1;
+    if( time_trend > 10 ) clock_freq -= 1, changed = 1;
+    if( time_trend < -10 ) clock_freq += 1, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
@@ -574,7 +552,6 @@ uint8_t changed;
        si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
     }
-
 }
 
 void frame_timer( unsigned long t ){   
