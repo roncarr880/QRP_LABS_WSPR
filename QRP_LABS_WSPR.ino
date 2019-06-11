@@ -35,15 +35,17 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // or self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
+#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency
 
 #define stage(c) Serial.write(c)
+
 
   // using even dividers between 6 and 254 for lower jitter
   // freq range 2 to 150 without using the post dividers
   // we are using the post dividers and can receive down to 40khz
   // vco 600 to 900
   
-uint64_t clock_freq = 2700446600;    // * 100 to enable setting fractional frequency
+uint64_t clock_freq = START_CLOCK_FREQ;
 uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
@@ -358,7 +360,6 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
                Serial.print("  Clk ");  Serial.print(early);
                Serial.write(',');   Serial.print(late);
                print_stats(1);
-               //Serial.print(" FF ");  Serial.print(cal_ff);
                Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
                Serial.println();
            }
@@ -422,7 +423,7 @@ uint8_t mn;
 uint8_t dy;
 static unsigned int decodes;
 uint8_t i;
-static uint64_t last_good = 2700446600;
+static uint64_t last_good = START_CLOCK_FREQ;
 
   ++decodes;
 
@@ -513,14 +514,24 @@ long error;
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
 int frame_sync(int err){
-int8_t t;
+int8_t t,i;
 static int last_time_error;
+static int last_error_count = 60;
+int loops;
 
+   loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
+   if( loops < 0 ) loops = -loops;
+   ++loops;
+   
+   if( last_error_count < 60 ) ++last_error_count;   // relax the test threshold
+   for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
+    
        t = 0;
-       if( err < 46 ){     // test threshold for signal present or not
-           t = ( frame_msec < 500 ) ? -1 : 1 ;
+       if( err < 47 && err < last_error_count ){     // test threshold for signal present or not
+           t = ( frame_msec < 500 ) ? -1 : 1 ;       // and lower error than last signal
            last_time_error = ( frame_msec < 500 ) ? frame_msec : frame_msec - 1000 ;  // refresh correction amount
            last_time_error += t;
+           last_error_count = err;
        }
        if( frame_msec != 0 ){  // avoid making frame_msec less than zero
            if( t == 0 ){       // use old data for the correction amount
@@ -528,22 +539,29 @@ static int last_time_error;
               if( last_time_error < 0 ) last_time_error++, t = 1;
            }
            frame_msec += t;
+           clock_correction( t );  // long term clock drift correction
        }
-       clock_correction( t );  // long term clock drift correction
-       return last_time_error;
+       err = 60;    // use last_time info for the 2nd pass in the loop
+   }
+   return last_time_error;    // return value for printing
 }
 
 
 void clock_correction( int8_t val ){    // long term trend correction to the master clock freq
-static int time_trend;                  // a change of +-100 is 1hz change
+static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;
+static uint8_t holdoff;
 
+    if( holdoff < 250 ){
+      ++holdoff;
+      return;
+    }
     if( wspr_tx_enable ) return;   // ignore this when transmitting
     
     changed = 0;
-    time_trend -= val;             // val is the inverse of reported FF
-    if( time_trend > 10 ) clock_freq -= 1, changed = 1;
-    if( time_trend < -10 ) clock_freq += 1, changed = 1;
+    time_trend += val;             // val :  add or sub for correct correction?
+    if( time_trend > 10 ) clock_freq -= 5, changed = 1;
+    if( time_trend < -10 ) clock_freq += 5, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
@@ -573,7 +591,7 @@ static int time_adjust;
       frame_msec -= 1000;
       if( ++frame_sec >= 120 ){     // 2 minute slot time
         frame_sec -= 120;
-        if( ++slot >= 7 ) slot = 0;   // 10 slots is a 20 minute frame
+        if( ++slot >= 8 ) slot = 0;   // 10 slots is a 20 minute frame
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
       }
       if( frame_sec == 116 ) cal_enable = 1;   // do once per slot in wspr quiet time
