@@ -552,16 +552,16 @@ static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;
 static uint8_t holdoff;
 
-    if( holdoff < 250 ){
+    if( holdoff < 180 ){
       ++holdoff;
       return;
     }
     if( wspr_tx_enable ) return;   // ignore this when transmitting
     
     changed = 0;
-    time_trend += val;             // val :  add or sub for correct correction?
-    if( time_trend > 10 ) clock_freq -= 5, changed = 1;
-    if( time_trend < -10 ) clock_freq += 5, changed = 1;
+    time_trend -= val;             // !!! val :  add or sub for correct correction?
+    if( time_trend > 10 ) clock_freq -= 16, changed = 1;   // 10,16 gives max 1hz/hr change
+    if( time_trend < -10 ) clock_freq += 16, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
