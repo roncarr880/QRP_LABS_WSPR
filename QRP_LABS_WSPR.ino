@@ -37,6 +37,12 @@
 #define MUTE  A1        // receiver module T/R switch pin
 #define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency
 
+// master clock update period and amount to change.  Update based upon WWVB sync on falling edge routine.
+// values of 10 and 16 will change the clock about 1hz per hour.
+// values of 10 and 1 will change about 1hz per 16 hours. 
+#define CLK_UPDATE_MIN 10
+#define CLK_UPDATE_AMT  1
+
 #define stage(c) Serial.write(c)
 
 
@@ -552,16 +558,16 @@ static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;
 static uint8_t holdoff;
 
-    if( holdoff < 180 ){
+    if( holdoff < 180 ){    // inhibit correction when 1st starting
       ++holdoff;
       return;
     }
     if( wspr_tx_enable ) return;   // ignore this when transmitting
     
     changed = 0;
-    time_trend -= val;             // !!! val :  add or sub for correct correction?
-    if( time_trend > 10 ) clock_freq -= 16, changed = 1;   // 10,16 gives max 1hz/hr change
-    if( time_trend < -10 ) clock_freq += 16, changed = 1;
+    time_trend -= val;
+    if( time_trend > CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1;
+    if( time_trend < -CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
