@@ -33,15 +33,20 @@
 #define RDIV   1        // starting sub divider.  1 will cover less than 1mhz to > 30mhz.
                         // 16 will cover 37khz to 2.3 mhz ( with the 4x factor it is 64 when transmitting )
 #define CAT_MODE  0     // computer control of TX
-#define FRAME_MODE 1    // or self timed frame (stand alone mode)
+#define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
 #define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency
+//#define START_CLOCK_FREQ   2700466600   // test too high
+//#define START_CLOCK_FREQ   2700426600   // test too low
+
 
 // master clock update period and amount to change.  Update based upon WWVB sync on falling edge routine.
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  1
+#define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_THRESHOLD  20    // errors allowed for consider valid sync to WWVB and allow clock adjustment
+uint8_t clk_update_threshold = 45;  // start out with a higher threshold and reduce it as we sync to wwvb
 
 #define stage(c) Serial.write(c)
 
@@ -58,7 +63,7 @@ const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
 uint32_t audio_freq = 1500;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
-
+int     clock_adj_sum;               // debug print value, clock slow or fast sum
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
 uint8_t wspr_tx_cancel;              // CAT control RX command cancels tx
@@ -113,7 +118,11 @@ const uint32_t magic_freq[10] = {
 // at end of 1 second( 8 bits), decide if temp has a 1, 0, or sync. Shift into 64 bit data and sync variables.
 // when the sync variable contains the magic number, decode the 64 bit data.
 #define WWVB_OUT 9
-#define WWVB_PWDN 8
+#define WWVB_PWDN 8      // was the low enable.  Rewired the WWVB receiver to get power from this I/O pin.
+                         // this reverses the logic so it is now high to enable.  With only two wires in the
+                         // cable, this seems like the best way to remove the need for the 9 volt battery
+                         // that was powering the wwvb receiver and to avoid taking the WSPR unit apart to 
+                         // switch the wiring to +5 volts instead of an I/O pin.
 uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 
 uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 1 for printing
@@ -127,7 +136,7 @@ int frame_msec;
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4
+#define FF  -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
 
 
 /***************************************************************************/
@@ -176,7 +185,8 @@ uint8_t i;
   
   pinMode(WWVB_OUT, INPUT);     // sample wwvb receiver signal
   pinMode(WWVB_PWDN, OUTPUT);
-  digitalWrite(WWVB_PWDN,LOW);  // enable wwvb receiver
+  // digitalWrite(WWVB_PWDN,LOW);  // enable wwvb receiver
+  digitalWrite(WWVB_PWDN,HIGH);    // power the wwvb receiver with the I/O pin
 
   // set up the relay pins, exercise the relays, delay is 1.2 seconds, so reset at 59 seconds odd minute to be on time
   for( i = 0; i < 6; ++i ){
@@ -212,6 +222,7 @@ uint8_t i;
   digitalWrite(band_info[band].pin,LOW);   // in case this turns out to be the correct relay
   band_change();  // select the correct relay
   //Serial.println(F("Starting..."));
+  pinMode(13,OUTPUT);
 }
 
 uint8_t  band_change(){
@@ -266,9 +277,10 @@ static uint32_t old_freq = 0;
 
 void loop() {
 static unsigned long ms;
+static int temp;            // just for flashing the LED when there is I2C activity. Check for I2C hangup.
 
    if( Serial.availableForWrite() > 20 ) radio_control();
-   i2poll();
+   temp += i2poll();
    
    if( ms != millis()){     // run once each ms
        ms = millis();
@@ -277,6 +289,12 @@ static unsigned long ms;
        if( wspr_tx_enable || wspr_tx_cancel ) wspr_tx(ms);
        if( cal_enable ) run_cal();
        wwvb_sample(ms);
+       if( temp  ){
+         if( temp > 100 ) temp = 100;
+         --temp;
+         if( temp ) digitalWrite(13,HIGH);
+         else       digitalWrite(13,LOW);   
+       }
    }
 
 }
@@ -366,7 +384,8 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
                Serial.print("  Clk ");  Serial.print(early);
                Serial.write(',');   Serial.print(late);
                print_stats(1);
-               Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
+               //Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
+               Serial.write(' ');   Serial.print(clock_adj_sum/100);
                Serial.println();
            }
            else print_stats(0);
@@ -533,8 +552,8 @@ int loops;
    for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
     
        t = 0;
-       if( err < 47 && err < last_error_count ){     // test threshold for signal present or not
-           t = ( frame_msec < 500 ) ? -1 : 1 ;       // and lower error than last signal
+       if( err < clk_update_threshold && err < last_error_count ){     // test threshold for signal present or not, and
+           t = ( frame_msec < 500 ) ? -1 : 1 ;                         // lower error than last signal
            last_time_error = ( frame_msec < 500 ) ? frame_msec : frame_msec - 1000 ;  // refresh correction amount
            last_time_error += t;
            last_error_count = err;
@@ -556,23 +575,31 @@ int loops;
 void clock_correction( int8_t val ){    // long term trend correction to the master clock freq
 static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;
-static uint8_t holdoff;
+//static uint8_t holdoff;
 
-    if( holdoff < 180 ){    // inhibit correction when 1st starting
-      ++holdoff;
-      return;
-    }
+//    if( holdoff < 60 ){    // inhibit correction when 1st starting
+//      ++holdoff;
+//      return;
+//    }
     if( wspr_tx_enable ) return;   // ignore this when transmitting
     
+    time_trend -= val;             // or should it be += val;
+    
+    // starting out with a larger threshold for errors, reduce the threshold, don't adjust the master clock
+    if( clk_update_threshold > CLK_UPDATE_THRESHOLD ){
+       changed = abs(time_trend);
+       if( changed >= CLK_UPDATE_MIN ) time_trend = 0, --clk_update_threshold;
+       return;
+    }
+
     changed = 0;
-    time_trend -= val;
-    if( time_trend > CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1;
-    if( time_trend < -CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;
+    if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1, clock_adj_sum += CLK_UPDATE_AMT;  
+    if( time_trend <= -CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1, clock_adj_sum -= CLK_UPDATE_AMT;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
-       if( clock_freq > 2700486600ULL ) clock_freq -= 100;   // stay within some bounds
-       if( clock_freq < 2700406600ULL ) clock_freq += 100;
+       if( clock_freq > 2700486600ULL ) clock_freq -= 100;   // stay within some bounds, +- 400
+       if( clock_freq < 2700406600ULL ) clock_freq += 100;   // +- 100 at 7mhz
        si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
     }
@@ -642,7 +669,7 @@ static unsigned int one_second;
 void tx_on(){
 
   digitalWrite(MUTE,HIGH);
-  digitalWrite(WWVB_PWDN,HIGH);   
+  digitalWrite(WWVB_PWDN,LOW); 
   i2cd(SI5351,3,0xff ^ (CLK0_EN));   // tx clock on, other clocks off during tx
 }
 
@@ -652,7 +679,7 @@ void tx_off(){
     i2flush();                                    // wait for tx off to complete before enabling the rx
     si_pll_x(PLLA,Rdiv*4*freq,divider,0);         // return to RX frequency
     digitalWrite(MUTE,LOW);                       // enable receiver
-    digitalWrite(WWVB_PWDN,LOW);                  // enable wwvb receiver
+    digitalWrite(WWVB_PWDN,HIGH);                 // enable wwvb receiver
 
     ee_save();     // save this freq to use during stand alone mode(FRAME MODE).
 }
@@ -1065,5 +1092,3 @@ static uint8_t delay_counter;
    if( i2in != i2out ) return (state + 8);
    else return state;
 }
-
-
