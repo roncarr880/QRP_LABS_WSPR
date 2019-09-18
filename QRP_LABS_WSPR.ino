@@ -45,8 +45,8 @@
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
 #define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  20    // errors allowed for consider valid sync to WWVB and allow clock adjustment
-uint8_t clk_update_threshold = 45;  // start out with a higher threshold and reduce it as we sync to wwvb
+#define CLK_UPDATE_THRESHOLD  30    // errors allowed per minute to consider valid sync to WWVB
+uint8_t clk_update_threshold = 57;  // start out with a higher threshold and reduce it as we sync to wwvb
 
 #define stage(c) Serial.write(c)
 
@@ -112,11 +112,6 @@ const uint32_t magic_freq[10] = {
   474200, 1836600, 3568600, 7038600, 10138700, 14095600, 18104600, 21094600, 24924600, 28124600
 };
 
-// WWVB receiver in a fringe area - integrate the signal to remove noise
-// Although it probably makes more sense to dump the integrator 10 times per second, here we use 8.
-// sample each millisecond, sum 100 or 150 samples , decide if low or high, shift into temp variable
-// at end of 1 second( 8 bits), decide if temp has a 1, 0, or sync. Shift into 64 bit data and sync variables.
-// when the sync variable contains the magic number, decode the 64 bit data.
 #define WWVB_OUT 9
 #define WWVB_PWDN 8      // was the low enable.  Rewired the WWVB receiver to get power from this I/O pin.
                          // this reverses the logic so it is now high to enable.  With only two wires in the
@@ -127,8 +122,8 @@ uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 
 uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 1 for printing
                          // or enter 1 CAT command( ?V for Rx only or #0 to stay in FRAME mode with logging )
-uint8_t wwvb_stats[8];   // bit distribution over 60 seconds
-uint8_t wwvb_last_err;   // display last error character received ( will show what causes just one error )
+//uint8_t wwvb_stats[8];   // bit distribution over 60 seconds
+//uint8_t wwvb_last_err;   // display last error character received ( will show what causes just one error )
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
@@ -300,143 +295,110 @@ static int temp;            // just for flashing the LED when there is I2C activ
 }
 
 
-// each second starts with a low signal and ends with a high signal
-// much like software sampling rs232 start and stop bits.
-// this routine runs fast by design until it locks on the wwvb signal
+//   sample the wwvb signal and detect bits, syncs, and errors
 void wwvb_sample(unsigned long t){
 static unsigned long old_t;
 int loops;
+static uint8_t bounce;
+static uint8_t state;
+static long ms;
+static unsigned int low_counter;
+static unsigned int high_counter;
+static long ave_time;
+static long ave_count;
 uint8_t b,s,e;
-static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
-const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
-static uint8_t secs,errors,early,late;   // debug use
-static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
+int adj;
 
-   loops = t - old_t;
-   old_t = t;
+  loops = t - old_t;
+  old_t = t;
    
-  while( loops-- ){   // repeat for any missed milliseconds  
+  while( loops-- ){   // repeat for any missed milliseconds
 
-   if( digitalRead(WWVB_OUT) == LOW ) ++wwvb_sum;
-
-   if( --wwvb_clk == 0 ){    // end of period, dump integrator
-      b = ( wwvb_sum > (counts[wwvb_count] >> 1) ) ? 0 : 128;
-      wwvb_tmp >>= 1;
-      wwvb_tmp |= b;
-      wwvb_sum = 0;
-
-      // 8 dumps of the integrator is one second, decode this bit ?
-      wwvb_count++;
-      wwvb_count &= 7;
-      wwvb_clk = counts[wwvb_count];  // 100 100 150 150 150 150 100 100
-                              // decode     0       1      sync    stop should be high
-      if( wwvb_count == 0 ){    // decode time
-
-        // clocks late or early, just dither them back and forth across the falling edge
-        // when not in sync, more 1's than 0's are detected and this slips in time.
-      if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
-         if( digitalRead(WWVB_OUT) == 0 ){  
-            ++late;                    // sampling late
-            wwvb_clk -= dither;        // adjust sample to earlier
-         }
-         else{
-            ++early;                   // need to sample later
-            wwvb_clk += dither;        // longer clock ( more of these as arduino runs fast )
-         }
-      }
-      
-        // decode
-        // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
-        b = 0;  s = 0;  e = 1;   // assume it is an error
-        
-        // strict decode works well, added some loose decode for common bit errors
-        if( wwvb_tmp == 0xfc || wwvb_tmp == 0xfd || wwvb_tmp == 0xfe ) e = 0, b = 0;
-        if( wwvb_tmp == 0xf0 || wwvb_tmp == 0xf1 ) e = 0, b = 1;
-        if( wwvb_tmp == 0xc0 || wwvb_tmp == 0xc1 ) e = 0, s = 1;
-
-        wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
-        wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
-        wwvb_errors <<= 1; wwvb_errors |= e;  // errors
-        if( e ) ++errors;
-        gather_stats( wwvb_tmp , e );         // for serial logging display
-        
+   bounce <<= 1;
+   if( digitalRead(WWVB_OUT) == HIGH ) bounce |= 1;     // debounce, looking for zero or 255 value
+   ++ms;
+   
+   switch(state){
+      case 0:                          // looking for a low signal
+         ++high_counter;
+   
+         if( bounce == 0 ){            // found the low,  decode the bit for the previous second
+            state = 1;
+            b = s = e = 0;
+            high_counter += low_counter;                                 // get total frame ms
+            if( high_counter < 800 || high_counter > 1200 ) e = 1;       // too short or too long
+            
+            if( low_counter > 100 && low_counter < 300 ) b = 0;          // decode the bit
+            else if( low_counter > 400 && low_counter < 600 ) b = 1;
+            else if( low_counter > 700 && low_counter < 900 ) s = 1;
+            else e = 1;                                                  // no valid decode
+            
+            low_counter = 0;
+            
+            wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
+            wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
+            wwvb_errors <<= 1; wwvb_errors |= e;  // errors
+            
         // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
         // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
-        // wwvb_sync &= 0x0fffffffffffffff;   // mask off the old bits from previous minute
-        // instead of masking, use the old bits to see the double sync bits at 0 of this minute
+        // use the old bits to see the double sync bits at 0 of this minute
         // and 59 seconds of the previous minute.  This decodes at zero time rather than some
         // algorithms that decode at 1 second past.
-        if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
-          if( wwvb_errors == 0 ){    // decode if no bit errors
-            wwvb_decode();
-          }
-        }
+           if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
+             if( wwvb_errors == 0 ){    // decode if no bit errors
+               wwvb_decode();
+             }
+           }            
 
-        if( ++secs >= 60 /*&& frame_sec < 114*/ ){  //  adjust dither each minute
-
-           int tm = frame_sync( errors );
-           
-                 // debug print out some stats when in test mode
-           if( wwvb_quiet == 1 && errors != 0){       
-               Serial.print("Tm "); Serial.print(frame_msec);
-               Serial.write(','); Serial.print(tm);
-               Serial.print("  Err "); Serial.print(errors);
-               Serial.print("  Clk ");  Serial.print(early);
-               Serial.write(',');   Serial.print(late);
-               print_stats(1);
-               //Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
-               Serial.write(' ');   Serial.print(clock_adj_sum/100);
-               Serial.println();
+            //  gather some stats for printing
+           if( e == 0 ){
+              ave_time += frame_msec;
+              if( frame_msec >= 500 ) ave_time -= 1000;      // 500-999 averaged in as -(1000-frame_msec)
+              ++ave_count;                                   // implemented as +frame_msec - 1000
            }
-           else print_stats(0);
-                      
-           dither = ( errors >> 4 ) + 1;
-           early = late = secs = errors = 0;   // reset the stats for the next minute
-        }
+         }
+      break;
+      case 1:                          // looking for a high signal
+         ++low_counter;
+         if( bounce == 255 ){
+            state = 0;
+            high_counter = 0;
+         }
 
-      }  // end decode time    
-    }    // end integration timer
+      break;
+   }
+
+   if( ms >= 60000 ){                   // print out some stats if in printing mode
+      
+      if( ave_count ){
+         ave_time = ave_time/ave_count;
+         if( ave_time < 0 ) ave_time += 1000;
+      }
+      adj = frame_sync( 60-ave_count, ave_time );      // sync our seconds to wwvb falling edge signal
+      
+      // debug print out some stats when in test mode
+      if( wwvb_quiet == 1 && ave_count != 60){       
+          Serial.print("Tm "); 
+          if( ave_time < 100 ) Serial.write(' ');
+          if( ave_time < 10 ) Serial.write(' ');
+          Serial.print(ave_time);
+          Serial.print("  Adj");
+          if( adj >= 0 ) Serial.write(' ');
+          if( abs(adj) < 100 ) Serial.write(' ');
+          if( abs(adj) < 10 ) Serial.write(' ');
+          Serial.print(adj);
+          Serial.print("  Valid ");
+          if( ave_count < 10 ) Serial.write(' ');
+          Serial.print(ave_count);
+          Serial.print("  Clock ");   Serial.print(clock_adj_sum/100);
+          Serial.println();
+      }
+        // reset the stats for the next minute
+      ms = ave_count = ave_time = 0;
+   }
+
   }      // loops - repeat for lost milliseconds if any
 }
-
-void gather_stats( uint8_t data, uint8_t err ){
-uint8_t i;
-
-   if( err ) wwvb_last_err = data;  // capture the last failed data bits for Serial log
-   
-   for( i = 0; i < 8; ++i ){
-      if( data & 1 ) ++wwvb_stats[i];
-      data >>= 1;
-   }
- 
-}
-
-
-void print_stats(uint8_t prnt){
-uint8_t i;
-
-   if( prnt ){                // ones and zeros distribution
-      Serial.print("  ");     // when in sync with WWVB, will see a display such as 11XXxx00
-      for( i = 7;  i < 8; --i ){
-         if( wwvb_stats[i] > 50 ) Serial.write('1');
-         else if( wwvb_stats[i] < 10 ) Serial.write('0');
-         else if( wwvb_stats[i] > 30 ) Serial.write('X');
-         else Serial.write('x');
-      //   wwvb_stats[i] = 0;
-      }
-
-     // Serial.write(' ');           // print binary with leading zero's, example failing data
-     // for( i = 7; i < 8; --i ){
-     //    if( wwvb_last_err & 0x80 ) Serial.write('1');
-     //    else Serial.write('0');
-     //    wwvb_last_err <<= 1;
-     // }
-   }
- 
-   for( i = 0; i < 8; ++i ) wwvb_stats[i] = 0;
- 
-}
-
 
 
 void wwvb_decode(){   // WWVB transmits the data for the previous minute just ended
@@ -538,12 +500,13 @@ long error;
 
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
-int frame_sync(int err){
+int frame_sync(int err, long tm){
 int8_t t,i;
 static int last_time_error;
 static int last_error_count = 60;
 int loops;
 
+   if( tm > 990 || tm < 10 ) tm = 0; // deadband for clock corrections
    loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
    if( loops < 0 ) loops = -loops;
    ++loops;
@@ -553,8 +516,9 @@ int loops;
     
        t = 0;
        if( err < clk_update_threshold && err < last_error_count ){     // test threshold for signal present or not, and
-           t = ( frame_msec < 500 ) ? -1 : 1 ;                         // lower error than last signal
-           last_time_error = ( frame_msec < 500 ) ? frame_msec : frame_msec - 1000 ;  // refresh correction amount
+           t = ( tm < 500 ) ? -1 : 1 ;                                 // lower error than last signal
+           if( tm == 0 ) t = 0;
+           last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;           // refresh correction amount
            last_time_error += t;
            last_error_count = err;
        }
@@ -1092,3 +1056,149 @@ static uint8_t delay_counter;
    if( i2in != i2out ) return (state + 8);
    else return state;
 }
+
+
+/*************************** some old code with interesting algorithms ****************************
+// WWVB receiver in a fringe area - integrate the signal to remove noise
+// Although it probably makes more sense to dump the integrator 10 times per second, here we use 8.
+// sample each millisecond, sum 100 or 150 samples , decide if low or high, shift into temp variable
+// at end of 1 second( 8 bits), decide if temp has a 1, 0, or sync. Shift into 64 bit data and sync variables.
+// when the sync variable contains the magic number, decode the 64 bit data.
+// each second starts with a low signal and ends with a high signal
+// much like software sampling rs232 start and stop bits.
+// this routine runs fast by design until it locks on the wwvb signal
+void wwvb_sample(unsigned long t){
+static unsigned long old_t;
+int loops;
+uint8_t b,s,e;
+static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
+const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
+static uint8_t secs,errors,early,late;   // debug use
+static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
+
+   loops = t - old_t;
+   old_t = t;
+   
+  while( loops-- ){   // repeat for any missed milliseconds  
+
+   if( digitalRead(WWVB_OUT) == LOW ) ++wwvb_sum;
+
+   if( --wwvb_clk == 0 ){    // end of period, dump integrator
+      b = ( wwvb_sum > (counts[wwvb_count] >> 1) ) ? 0 : 128;
+      wwvb_tmp >>= 1;
+      wwvb_tmp |= b;
+      wwvb_sum = 0;
+
+      // 8 dumps of the integrator is one second, decode this bit ?
+      wwvb_count++;
+      wwvb_count &= 7;
+      wwvb_clk = counts[wwvb_count];  // 100 100 150 150 150 150 100 100
+                              // decode     0       1      sync    stop should be high
+      if( wwvb_count == 0 ){    // decode time
+
+        // clocks late or early, just dither them back and forth across the falling edge
+        // when not in sync, more 1's than 0's are detected and this slips in time.
+      if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
+         if( digitalRead(WWVB_OUT) == 0 ){  
+            ++late;                    // sampling late
+            wwvb_clk -= dither;        // adjust sample to earlier
+         }
+         else{
+            ++early;                   // need to sample later
+            wwvb_clk += dither;        // longer clock ( more of these as arduino runs fast )
+         }
+      }
+      
+        // decode
+        // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
+        b = 0;  s = 0;  e = 1;   // assume it is an error
+        
+        // strict decode works well, added some loose decode for common bit errors
+        if( wwvb_tmp == 0xfc || wwvb_tmp == 0xfd || wwvb_tmp == 0xfe ) e = 0, b = 0;
+        if( wwvb_tmp == 0xf0 || wwvb_tmp == 0xf1 ) e = 0, b = 1;
+        if( wwvb_tmp == 0xc0 || wwvb_tmp == 0xc1 ) e = 0, s = 1;
+
+        wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
+        wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
+        wwvb_errors <<= 1; wwvb_errors |= e;  // errors
+        if( e ) ++errors;
+        gather_stats( wwvb_tmp , e );         // for serial logging display
+        
+        // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
+        // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
+        // wwvb_sync &= 0x0fffffffffffffff;   // mask off the old bits from previous minute
+        // instead of masking, use the old bits to see the double sync bits at 0 of this minute
+        // and 59 seconds of the previous minute.  This decodes at zero time rather than some
+        // algorithms that decode at 1 second past.
+        if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
+          if( wwvb_errors == 0 ){    // decode if no bit errors
+            wwvb_decode();
+          }
+        }
+
+        if( ++secs >= 60 ){  //  adjust dither each minute
+
+           int tm = frame_sync( errors );
+           
+                 // debug print out some stats when in test mode
+           if( wwvb_quiet == 1 && errors != 0){       
+               Serial.print("Tm "); Serial.print(frame_msec);
+               Serial.write(','); Serial.print(tm);
+               Serial.print("  Err "); Serial.print(errors);
+               Serial.print("  Clk ");  Serial.print(early);
+               Serial.write(',');   Serial.print(late);
+               print_stats(1);
+               //Serial.write(' '); Serial.print((unsigned long)( clock_freq / 100LL) );
+               Serial.write(' ');   Serial.print(clock_adj_sum/100);
+               Serial.println();
+           }
+           else print_stats(0);
+                      
+           dither = ( errors >> 4 ) + 1;
+           early = late = secs = errors = 0;   // reset the stats for the next minute
+        }
+
+      }  // end decode time    
+    }    // end integration timer
+  }      // loops - repeat for lost milliseconds if any
+}
+
+void gather_stats( uint8_t data, uint8_t err ){
+uint8_t i;
+
+   if( err ) wwvb_last_err = data;  // capture the last failed data bits for Serial log
+   
+   for( i = 0; i < 8; ++i ){
+      if( data & 1 ) ++wwvb_stats[i];
+      data >>= 1;
+   }
+ 
+}
+
+
+void print_stats(uint8_t prnt){
+uint8_t i;
+
+   if( prnt ){                // ones and zeros distribution
+      Serial.print("  ");     // when in sync with WWVB, will see a display such as 11XXxx00
+      for( i = 7;  i < 8; --i ){
+         if( wwvb_stats[i] > 50 ) Serial.write('1');
+         else if( wwvb_stats[i] < 10 ) Serial.write('0');
+         else if( wwvb_stats[i] > 30 ) Serial.write('X');
+         else Serial.write('x');
+      //   wwvb_stats[i] = 0;
+      }
+
+     // Serial.write(' ');           // print binary with leading zero's, example failing data
+     // for( i = 7; i < 8; --i ){
+     //    if( wwvb_last_err & 0x80 ) Serial.write('1');
+     //    else Serial.write('0');
+     //    wwvb_last_err <<= 1;
+     // }
+   }
+ 
+   for( i = 0; i < 8; ++i ) wwvb_stats[i] = 0;
+ 
+}
+
+************************************************/
