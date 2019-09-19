@@ -403,11 +403,11 @@ int adj;
 
 void wwvb_decode(){   // WWVB transmits the data for the previous minute just ended
 uint16_t tmp;
-uint8_t tmp2;
-uint8_t yr;
-uint8_t hr;
-uint8_t mn;
-uint8_t dy;
+uint16_t tmp2;
+uint16_t yr;
+uint16_t hr;
+uint16_t mn;
+uint16_t dy;
 static unsigned int decodes;
 uint8_t i;
 static uint64_t last_good = START_CLOCK_FREQ;
@@ -449,9 +449,9 @@ static uint64_t last_good = START_CLOCK_FREQ;
 }
 
 // wwvb fields decode about the same way
-uint8_t wwvb_decode2( uint8_t pos, uint16_t mask ){ 
+uint16_t wwvb_decode2( uint8_t pos, uint16_t mask ){ 
 uint16_t tmp;
-uint8_t val;
+uint16_t val;
 
   tmp = ( wwvb_data >> ( 59 - pos ) ) & mask;
   val = 0;
@@ -506,7 +506,7 @@ static int last_time_error;
 static int last_error_count = 60;
 int loops;
 
-   if( tm > 990 || tm < 10 ) tm = 0; // deadband for clock corrections
+   if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
    loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
    if( loops < 0 ) loops = -loops;
    ++loops;
