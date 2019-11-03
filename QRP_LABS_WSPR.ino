@@ -44,7 +44,7 @@
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_AMT  100 //20          // amount in factional hz, 1/100 hz
 #define CLK_UPDATE_THRESHOLD  30    // errors allowed per minute to consider valid sync to WWVB
 uint8_t clk_update_threshold = 57;  // start out with a higher threshold and reduce it as we sync to wwvb
 
@@ -63,13 +63,13 @@ const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
 uint32_t audio_freq = 1500;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
-int     clock_adj_sum;               // debug print value, clock slow or fast sum
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
 uint8_t wspr_tx_cancel;              // CAT control RX command cancels tx
 uint8_t cal_enable;
 long tm_correct_count = 10753;       // add or sub one ms for time correction per this many ms
 int8_t tm_correction = 0;            // 0, 1 or -1 time correction
+int8_t tm_correction2;               // frame sync to wwvb signal falling edge
 
 //      Download WSPRcode.exe from  http://physics.princeton.edu/pulsar/K1JT/WSPRcode.exe   and run it in a dos window 
 //      Type (for example):   WSPRcode "K1ABC FN33 37"    37 is 5 watts, 30 is 1 watt, 33 is 2 watts, 27 is 1/2 watt
@@ -131,7 +131,7 @@ int frame_msec;
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
+#define FF  -9 // -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
 
 
 /***************************************************************************/
@@ -308,6 +308,7 @@ static long ave_time;
 static long ave_count;
 uint8_t b,s,e;
 int adj;
+int clock_adj_sum;
 
   loops = t - old_t;
   old_t = t;
@@ -377,7 +378,8 @@ int adj;
       adj = frame_sync( 60-ave_count, ave_time );      // sync our seconds to wwvb falling edge signal
       
       // debug print out some stats when in test mode
-      if( wwvb_quiet == 1 && ave_count != 60){       
+      if( wwvb_quiet == 1 && ave_count != 60){   
+          clock_adj_sum = clock_freq - START_CLOCK_FREQ;    
           Serial.print("Tm "); 
           if( ave_time < 100 ) Serial.write(' ');
           if( ave_time < 10 ) Serial.write(' ');
@@ -521,15 +523,16 @@ int loops;
            last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;           // refresh correction amount
            last_time_error += t;
            last_error_count = err;
+           if( clk_update_threshold > CLK_UPDATE_THRESHOLD ) --clk_update_threshold;
        }
-       if( frame_msec != 0 ){  // avoid making frame_msec less than zero
-           if( t == 0 ){       // use old data for the correction amount
-              if( last_time_error > 0 ) last_time_error--, t = -1;
-              if( last_time_error < 0 ) last_time_error++, t = 1;
-           }
-           frame_msec += t;
-           clock_correction( t );  // long term clock drift correction
+
+       if( t == 0 ){       // use old data for the correction amount
+          if( last_time_error > 0 ) last_time_error--, t = -1;
+          if( last_time_error < 0 ) last_time_error++, t = 1;
        }
+       tm_correction2 = t;
+       clock_correction( t );  // long term clock drift correction
+  
        err = 60;    // use last_time info for the 2nd pass in the loop
    }
    return last_time_error;    // return value for printing
@@ -539,26 +542,15 @@ int loops;
 void clock_correction( int8_t val ){    // long term trend correction to the master clock freq
 static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;
-//static uint8_t holdoff;
 
-//    if( holdoff < 60 ){    // inhibit correction when 1st starting
-//      ++holdoff;
-//      return;
-//    }
-    if( wspr_tx_enable ) return;   // ignore this when transmitting
+    if( wspr_tx_enable ) return;                                // ignore this when transmitting
+    if( clk_update_threshold > CLK_UPDATE_THRESHOLD ) return;   // ignore when just starting out
     
     time_trend -= val;             // or should it be += val;
-    
-    // starting out with a larger threshold for errors, reduce the threshold, don't adjust the master clock
-    if( clk_update_threshold > CLK_UPDATE_THRESHOLD ){
-       changed = abs(time_trend);
-       if( changed >= CLK_UPDATE_MIN ) time_trend = 0, --clk_update_threshold;
-       return;
-    }
 
     changed = 0;
-    if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1, clock_adj_sum += CLK_UPDATE_AMT;  
-    if( time_trend <= -CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1, clock_adj_sum -= CLK_UPDATE_AMT;
+    if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;  
+    if( time_trend <= -CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1;
     
     if( changed ){    // set new dividers for the new master clock freq value to take effect
        time_trend = 0;
@@ -583,6 +575,12 @@ static int time_adjust;
         time_adjust -= tm_correct_count;
         frame_msec += tm_correction;    // add one, sub one or no change depending upon tm_correction value
     }
+
+    if( tm_correction2 && frame_msec != 0 ){
+      frame_msec += tm_correction2;
+      tm_correction2 = 0;
+    }
+    
    old_t = t;
    if( frame_msec >= 1000 ){
       frame_msec -= 1000;
