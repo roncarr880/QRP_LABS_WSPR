@@ -35,7 +35,7 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency
+#define START_CLOCK_FREQ   2700447000   // *100 for setting fractional frequency  ( 446600 )
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
@@ -44,7 +44,7 @@
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  100 //20          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
 #define CLK_UPDATE_THRESHOLD  30    // errors allowed per minute to consider valid sync to WWVB
 uint8_t clk_update_threshold = 57;  // start out with a higher threshold and reduce it as we sync to wwvb
 
@@ -131,8 +131,8 @@ int frame_msec;
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -9 // -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
-
+#define FF  -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
+                 // 
 
 /***************************************************************************/
 
@@ -492,9 +492,12 @@ long error;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
        if( error < 2000 ) tm_correct_count = 3000000L / error;
        else tm_correction = 0;                   // defeat correction if freq counted is obviously wrong
-       //Serial.println( result );
-       //Serial.println(tm_correction);
-       //Serial.println(tm_correct_count);
+       if( wwvb_quiet == 1 && tm_correction == 0 ){    // wwvb logging mode
+          Serial.print( result );   Serial.write(' ');
+          Serial.print( error );    Serial.write(' ');
+          Serial.print(tm_correction);  Serial.write(' ');
+          Serial.print(tm_correct_count);  Serial.write(' ');
+       }
        FreqCount.end();
        cal_enable = 0;
    }  
@@ -508,7 +511,7 @@ static int last_time_error;
 static int last_error_count = 60;
 int loops;
 
-   if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
+   // if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
    loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
    if( loops < 0 ) loops = -loops;
    ++loops;
@@ -546,7 +549,7 @@ uint8_t changed;
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
     if( clk_update_threshold > CLK_UPDATE_THRESHOLD ) return;   // ignore when just starting out
     
-    time_trend -= val;             // or should it be += val;
+    time_trend += val;             // or should it be -= val;
 
     changed = 0;
     if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;  
