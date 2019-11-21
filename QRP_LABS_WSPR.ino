@@ -45,8 +45,7 @@
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
 #define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  30    // errors allowed per minute to consider valid sync to WWVB
-uint8_t clk_update_threshold = 57;  // start out with a higher threshold and reduce it as we sync to wwvb
+#define CLK_UPDATE_THRESHOLD  50    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -520,13 +519,12 @@ int loops;
    for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
     
        t = 0;
-       if( err < clk_update_threshold && err < last_error_count ){     // test threshold for signal present or not, and
+       if( err < CLK_UPDATE_THRESHOLD && err < last_error_count ){     // test threshold for signal present or not, and
            t = ( tm < 500 ) ? -1 : 1 ;                                 // lower error than last signal
            if( tm == 0 ) t = 0;
            last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;           // refresh correction amount
            last_time_error += t;
            last_error_count = err;
-           if( clk_update_threshold > CLK_UPDATE_THRESHOLD ) --clk_update_threshold;
        }
 
        if( t == 0 ){       // use old data for the correction amount
@@ -547,7 +545,6 @@ static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;
 
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
-    if( clk_update_threshold > CLK_UPDATE_THRESHOLD ) return;   // ignore when just starting out
     
     time_trend += val;             // or should it be -= val;
 
