@@ -45,7 +45,7 @@
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
 #define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  50    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_THRESHOLD  45    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -130,7 +130,7 @@ int frame_msec;
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -7   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
+#define FF  -6   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
                  // 
 
 /***************************************************************************/
@@ -546,7 +546,7 @@ uint8_t changed;
 
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
     
-    time_trend += val;             // or should it be -= val;
+    time_trend -= val;             // or should it be -= val;
 
     changed = 0;
     if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;  
