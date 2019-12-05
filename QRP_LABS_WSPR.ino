@@ -35,8 +35,8 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   2700447000   // *100 for setting fractional frequency  ( 446600 )
-//#define START_CLOCK_FREQ   2700466600   // test too high
+//#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency  ( 446600 )
+#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
 
@@ -45,7 +45,7 @@
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
 #define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  45    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_THRESHOLD  40    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -130,7 +130,7 @@ int frame_msec;
 // long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
 // drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -6   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
+#define FF  -18   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
                  // 
 
 /***************************************************************************/
