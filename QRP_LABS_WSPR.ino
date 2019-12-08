@@ -36,16 +36,16 @@
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
 //#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency  ( 446600 )
-#define START_CLOCK_FREQ   2700466600   // test too high
-//#define START_CLOCK_FREQ   2700426600   // test too low
+//#define START_CLOCK_FREQ   2700466600   // test too high
+#define START_CLOCK_FREQ   2700426600   // test too low
 
 
 // master clock update period and amount to change.  Update based upon WWVB sync on falling edge routine.
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  40    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_AMT  30          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_THRESHOLD  50    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
