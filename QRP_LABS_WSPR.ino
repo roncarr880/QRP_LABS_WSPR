@@ -35,17 +35,17 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-//#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency  ( 446600 )
+#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency  ( 446600 )
 //#define START_CLOCK_FREQ   2700466600   // test too high
-#define START_CLOCK_FREQ   2700426600   // test too low
+//#define START_CLOCK_FREQ   2700426600   // test too low
 
 
 // master clock update period and amount to change.  Update based upon WWVB sync on falling edge routine.
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  30          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  50    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_THRESHOLD  30    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -60,7 +60,7 @@ uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1500;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1538;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
@@ -127,11 +127,9 @@ uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 1 for printing
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
-// long before the wwvb gets a complete decode, the clock syncs up to the signal.  Use this to remove the
-// drift in the time keeping.  Adjust frame_msec each minute by -1, 0, or 1.
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -18   //  precalculated freq measure offset, -14  -9 -7 | -6 -5 -4 
-                 // 
+#define FF  -2    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
+                  // fudge factor for frequency counter result ( counting 3 mhz signal )
 
 /***************************************************************************/
 
