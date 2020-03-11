@@ -44,8 +44,8 @@
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  20          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  30    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_AMT  50          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_THRESHOLD  20    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -60,7 +60,7 @@ uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1538;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1500;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
@@ -128,7 +128,7 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF  -2    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
+#define FF -12    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
                   // fudge factor for frequency counter result ( counting 3 mhz signal )
 
 /***************************************************************************/
