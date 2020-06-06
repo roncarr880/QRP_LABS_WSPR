@@ -45,10 +45,12 @@
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
 #define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  10    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_THRESHOLD  55    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
+int last_error_count = 60;
+char val_print = ' ';
 
   // using even dividers between 6 and 254 for lower jitter
   // freq range 2 to 150 without using the post dividers
@@ -58,6 +60,7 @@
 uint64_t clock_freq = START_CLOCK_FREQ;
 uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
+long cal_result;
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
 uint32_t audio_freq = 1530;          // wspr 1400 to 1600 offset from base vfo freq 
@@ -66,7 +69,7 @@ uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
 uint8_t wspr_tx_cancel;              // CAT control RX command cancels tx
 uint8_t cal_enable;
-long tm_correct_count = 10753;       // add or sub one ms for time correction per this many ms
+long tm_correct_count = 60000;       // add or sub one ms for time correction per this many ms
 int8_t tm_correction = 0;            // 0, 1 or -1 time correction
 int8_t tm_correction2;               // frame sync to wwvb signal falling edge
 
@@ -372,10 +375,12 @@ int clock_adj_sum;
          ave_time = ave_time/ave_count;
          if( ave_time < 0 ) ave_time += 1000;
       }
+
+      val_print = ' ';
       adj = frame_sync( 60-ave_count, ave_time );      // sync our seconds to wwvb falling edge signal
       
       // debug print out some stats when in test mode
-      if( wwvb_quiet == 1 && ave_count != 60){   
+      if( wwvb_quiet == 1 /*&& ave_count != 60*/){   
           clock_adj_sum = clock_freq - START_CLOCK_FREQ;    
           Serial.print("Tm "); 
           if( ave_time < 100 ) Serial.write(' ');
@@ -389,7 +394,10 @@ int clock_adj_sum;
           Serial.print("  Valid ");
           if( ave_count < 10 ) Serial.write(' ');
           Serial.print(ave_count);
+          Serial.write(val_print);
           Serial.print("  Clock ");   Serial.print(clock_adj_sum/100);
+        //  Serial.print("  Correct_Count "); Serial.print(tm_correct_count);
+          Serial.print("  Cal Freq "); Serial.print(cal_result);
           Serial.println();
       }
         // reset the stats for the next minute
@@ -411,6 +419,9 @@ static unsigned int decodes;
 uint8_t i;
 static uint64_t last_good = START_CLOCK_FREQ;
 
+  tmp2 = frame_sec;
+  tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
+
   ++decodes;
 
   yr = wwvb_decode2( 53, 0x1ff );   // year is 0 to 99
@@ -418,8 +429,6 @@ static uint64_t last_good = START_CLOCK_FREQ;
   hr = wwvb_decode2( 18, 0x3f );
   mn = wwvb_decode2( 8, 0xff );
 
-  tmp2 = frame_sec;
-  tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
                             // only apply clock corrections in the middle of the two minute frame or may
                             // otherwise mess up the frame timing
@@ -483,11 +492,12 @@ long error;
    }
 
    if( FreqCount.available() ){
-       result = (long)FreqCount.read() + (long)(FF);
+       cal_result = (long)FreqCount.read();
+       result =  cal_result + (long)(FF);
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
-       if( error < 2000 ) tm_correct_count = 3000000L / error;
+       if( error < 2000 ) tm_correct_count =  3000000L / error ;
        else tm_correction = 0;                   // defeat correction if freq counted is obviously wrong
        if( wwvb_quiet == 1 && tm_correction == 0 ){    // wwvb logging mode
           Serial.print( result );   Serial.write(' ');
@@ -505,7 +515,8 @@ long error;
 int frame_sync(int err, long tm){
 int8_t t,i;
 static int last_time_error;
-static int last_error_count = 60;
+//static int last_error_count = 60;  // made global for printing 
+static int error_mod;             // relax threshold each 10 ( or n ) 
 int loops;
 
    // if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
@@ -513,23 +524,30 @@ int loops;
    if( loops < 0 ) loops = -loops;
    ++loops;
    
-   if( last_error_count < 60 ) ++last_error_count;   // relax the test threshold
+   if( last_error_count < CLK_UPDATE_THRESHOLD ){
+       if( ++error_mod >= 10 ){
+          ++last_error_count;   // relax the test threshold
+          error_mod = 0;     
+       }
+   }
+   
    for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
     
        t = 0;
-       if( err < CLK_UPDATE_THRESHOLD && err < last_error_count ){     // test threshold for signal present or not, and
-           t = ( tm < 500 ) ? -1 : 1 ;                                 // lower error than last signal
+       if( err < last_error_count ){     // signal better than the relaxing threshold
+           t = ( tm < 500 ) ? -1 : 1 ;  
            if( tm == 0 ) t = 0;
            last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;           // refresh correction amount
            last_time_error += t;
-           last_error_count = err;
+           last_error_count = err;       // new threshold
+           val_print = '*';
        }
 
        if( t == 0 ){       // use old data for the correction amount
           if( last_time_error > 0 ) last_time_error--, t = -1;
           if( last_time_error < 0 ) last_time_error++, t = 1;
        }
-       tm_correction2 = t;
+       tm_correction2 += t;
        clock_correction( t );  // long term clock drift correction
   
        err = 60;    // use last_time info for the 2nd pass in the loop
@@ -574,7 +592,7 @@ static int time_adjust;
         frame_msec += tm_correction;    // add one, sub one or no change depending upon tm_correction value
     }
 
-    if( tm_correction2 && frame_msec != 0 ){
+    if( tm_correction2 && frame_msec > 400 && frame_msec < 600 ){
       frame_msec += tm_correction2;
       tm_correction2 = 0;
     }
