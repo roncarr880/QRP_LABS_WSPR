@@ -58,6 +58,8 @@ char val_print = ' ';
   // vco 600 to 900
   
 uint64_t clock_freq = START_CLOCK_FREQ;
+uint64_t drift;                      // calibrate freq result used as a measure of temperature and mapped to correct
+                                     // 27 master clock drift
 uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
 long cal_result;
@@ -131,9 +133,9 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF -12    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
+#define FF -14    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
                   // fudge factor for frequency counter result ( counting 3 mhz signal )
-
+                  // -12
 /***************************************************************************/
 
 void ee_save(){ 
@@ -396,6 +398,7 @@ int clock_adj_sum;
           Serial.print(ave_count);
           Serial.write(val_print);
           Serial.print("  Clock ");   Serial.print(clock_adj_sum/100);
+          Serial.print("  Drift ");   Serial.print((int)drift/100);
         //  Serial.print("  Correct_Count "); Serial.print(tm_correct_count);
           Serial.print("  Cal Freq "); Serial.print(cal_result);
           Serial.println();
@@ -492,21 +495,23 @@ long error;
    }
 
    if( FreqCount.available() ){
-       cal_result = (long)FreqCount.read();
-       result =  cal_result + (long)(FF);
+       cal_result = (long)FreqCount.read();    // ?? should FF affect time keeping only or freq drift too
+       result =  cal_result + (long)(FF);      // here FF affects time keeping
+       cal_result = result;                    // uncommented it also affects freq drift
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
        if( error < 2000 ) tm_correct_count =  3000000L / error ;
        else tm_correction = 0;                   // defeat correction if freq counted is obviously wrong
        if( wwvb_quiet == 1 && tm_correction == 0 ){    // wwvb logging mode
-          Serial.print( result );   Serial.write(' ');
-          Serial.print( error );    Serial.write(' ');
-          Serial.print(tm_correction);  Serial.write(' ');
-          Serial.print(tm_correct_count);  Serial.write(' ');
+        // Serial.print( result );   Serial.write(' ');
+        //  Serial.print( error );    Serial.write(' ');
+        //  Serial.print(tm_correction);  Serial.write(' ');
+        //  Serial.print(tm_correct_count);  Serial.write(' ');
        }
        FreqCount.end();
        cal_enable = 0;
+       temp_correction();
    }  
 }
 
@@ -556,10 +561,10 @@ int loops;
 }
 
 
-void clock_correction( int8_t val ){    // long term trend correction to the master clock freq
+void clock_correction( int8_t val ){    // long term frequency correction to the master clock
 static int8_t time_trend;               // a change of +-100 is 1hz change
-uint8_t changed;
-
+uint8_t changed;                        // correct for seasonal temperature variations to clocks
+                                        // using the WWVB time to arduino time errors
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
     
     time_trend -= val;             // or should it be += val;
@@ -574,6 +579,20 @@ uint8_t changed;
        if( clock_freq < 2700406600ULL ) clock_freq += 100;   // +- 100 at 7mhz
        si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
+    }
+}
+
+void temp_correction( ){    // short term drift correction with a linear map
+uint64_t local_drift;       // corrects for drift due to day/night temperature changes
+
+    if( wspr_tx_enable ) return;                                // ignore this when transmitting
+
+    local_drift = map( cal_result, 2999900, 3000000, 2000, 0 );
+
+    if( local_drift != drift ){
+       drift = local_drift;
+       si_pll_x(PLLB,cal_freq,cal_divider,0);
+       si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // new receiver 4x clock, transmitter 1x clock
     }
 }
 
@@ -680,19 +699,21 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
  uint64_t a,b,c;
  uint64_t bc128;             // floor 128 * b/c term of equations
  uint64_t pll_freq;
+ uint64_t cl_freq;
 
  uint32_t P1;            // PLL config register P1
  uint32_t P2;            // PLL config register P2
  uint32_t P3;            // PLL config register P3
  uint64_t r;
-   
+
+   cl_freq = clock_freq + drift;
    c = 1000000;     // max 1048575
    pll_freq = 100ULL * (uint64_t)freq + fraction;    // allow fractional frequency for wspr
    pll_freq = pll_freq * out_divider;
-   a = pll_freq / clock_freq ;
-   r = pll_freq - a * clock_freq ;
-   b = ( c * r ) / clock_freq;
-   bc128 =  (128 * r)/ clock_freq;
+   a = pll_freq / cl_freq ;
+   r = pll_freq - a * cl_freq ;
+   b = ( c * r ) / cl_freq;
+   bc128 =  (128 * r)/ cl_freq;
    P1 = 128 * a + bc128 - 512;
    P2 = 128 * b - c * bc128;
    if( P2 > c ) P2 = 0;        // avoid negative numbers 
