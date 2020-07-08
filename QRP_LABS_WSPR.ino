@@ -35,7 +35,7 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   2700446600   // *100 for setting fractional frequency  ( 446600 )
+#define START_CLOCK_FREQ   2700449800LL   // *100 for setting fractional frequency  ( 446600 ) 
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
@@ -45,7 +45,7 @@
 // values of 10 and 1 will change about 1hz per 16 hours. 
 #define CLK_UPDATE_MIN 10
 #define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  55    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_THRESHOLD  58    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -133,7 +133,7 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF -14    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
+#define FF 0    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
                   // fudge factor for frequency counter result ( counting 3 mhz signal )
                   // -12
 /***************************************************************************/
@@ -495,8 +495,8 @@ long error;
    }
 
    if( FreqCount.available() ){
-       cal_result = (long)FreqCount.read();    // ?? should FF affect time keeping only or freq drift too
-       result =  cal_result + (long)(FF);      // here FF affects time keeping
+       cal_result = (long)FreqCount.read();    // should FF affect time keeping only or freq drift too
+       result =  cal_result + (long)(FF);      // FF affects time keeping, clock adjustment
        cal_result = result;                    // uncommented it also affects freq drift
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
@@ -523,14 +523,16 @@ static int last_time_error;
 //static int last_error_count = 60;  // made global for printing 
 static int error_mod;             // relax threshold each 10 ( or n ) 
 int loops;
+int cnt;
 
    // if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
+   cnt = 60 - err;                   // !!! convert and convert back, change function arg if this algorithm works
    loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
    if( loops < 0 ) loops = -loops;
    ++loops;
    
-   if( last_error_count < CLK_UPDATE_THRESHOLD ){
-       if( ++error_mod >= 10 ){
+   if( last_error_count <= CLK_UPDATE_THRESHOLD ){
+       if( ++error_mod >= 5 ){
           ++last_error_count;   // relax the test threshold
           error_mod = 0;     
        }
@@ -544,6 +546,7 @@ int loops;
            if( tm == 0 ) t = 0;
            last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;           // refresh correction amount
            last_time_error += t;
+          last_time_error = constrain(last_time_error,-5*cnt,5*cnt);        // limit change for larger errors count
            last_error_count = err;       // new threshold
            val_print = '*';
        }
@@ -588,6 +591,7 @@ uint64_t local_drift;       // corrects for drift due to day/night temperature c
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
 
     local_drift = map( cal_result, 2999900, 3000000, 2000, 0 );
+//    local_drift = map( cal_result, 2999900, 3000000, 6000, 3500 );  // ?? jumped 10 hz on 40 meters for some reason
 
     if( local_drift != drift ){
        drift = local_drift;
@@ -600,7 +604,7 @@ void frame_timer( unsigned long t ){
 static unsigned long old_t;
 static uint8_t slot;
 
-static int time_adjust;   
+static long time_adjust;   
 // 16mhz clock measured at 16001111.  Will gain 1ms in approx 14401 ms.  Or 1 second in 4 hours.
 // the calibrate function has been repurposed to correct the time keeping of the Arduino.
 
@@ -706,7 +710,11 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
  uint32_t P3;            // PLL config register P3
  uint64_t r;
 
-   cl_freq = clock_freq + drift;
+   cl_freq = clock_freq;
+   
+   //if( pll == PLLA ) cl_freq += drift;               // drift not applied to 3 mhz calibrate freq
+   cl_freq += drift;                                 // drift applied to 3 mhz.  Pick one of these.
+   
    c = 1000000;     // max 1048575
    pll_freq = 100ULL * (uint64_t)freq + fraction;    // allow fractional frequency for wspr
    pll_freq = pll_freq * out_divider;
