@@ -43,9 +43,9 @@
 // master clock update period and amount to change.  Update based upon WWVB sync on falling edge routine.
 // values of 10 and 16 will change the clock about 1hz per hour.
 // values of 10 and 1 will change about 1hz per 16 hours. 
-#define CLK_UPDATE_MIN 10
-#define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  58    // errors allowed per minute to consider valid sync to WWVB
+//#define CLK_UPDATE_MIN 10
+//#define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
+#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 
 #define stage(c) Serial.write(c)
 
@@ -65,7 +65,7 @@ const uint32_t cal_freq = 3000000;   // calibrate frequency
 long cal_result;
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1530;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1470;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
@@ -133,9 +133,10 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
 //                                                      lose       |  gain   when clock at 27...4466
-#define FF 0    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
+// #define FF 0    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
                   // fudge factor for frequency counter result ( counting 3 mhz signal )
                   // -12
+int FF = 0;      // try vary FF instead of the master clock freq                  
 /***************************************************************************/
 
 void ee_save(){ 
@@ -310,7 +311,7 @@ static long ave_time;
 static long ave_count;
 uint8_t b,s,e;
 int adj;
-int clock_adj_sum;
+// int clock_adj_sum;
 
   loops = t - old_t;
   old_t = t;
@@ -383,7 +384,7 @@ int clock_adj_sum;
       
       // debug print out some stats when in test mode
       if( wwvb_quiet == 1 /*&& ave_count != 60*/){   
-          clock_adj_sum = clock_freq - START_CLOCK_FREQ;    
+          //clock_adj_sum = clock_freq - START_CLOCK_FREQ;    
           Serial.print("Tm "); 
           if( ave_time < 100 ) Serial.write(' ');
           if( ave_time < 10 ) Serial.write(' ');
@@ -397,7 +398,7 @@ int clock_adj_sum;
           if( ave_count < 10 ) Serial.write(' ');
           Serial.print(ave_count);
           Serial.write(val_print);
-          Serial.print("  Clock ");   Serial.print(clock_adj_sum/100);
+          Serial.print("  FF ");   Serial.print(FF);
           Serial.print("  Drift ");   Serial.print((int)drift/100);
         //  Serial.print("  Correct_Count "); Serial.print(tm_correct_count);
           Serial.print("  Cal Freq "); Serial.print(cal_result);
@@ -420,7 +421,7 @@ uint16_t mn;
 uint16_t dy;
 static unsigned int decodes;
 uint8_t i;
-static uint64_t last_good = START_CLOCK_FREQ;
+// static uint64_t last_good = START_CLOCK_FREQ;
 
   tmp2 = frame_sec;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
@@ -435,12 +436,12 @@ static uint64_t last_good = START_CLOCK_FREQ;
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
                             // only apply clock corrections in the middle of the two minute frame or may
                             // otherwise mess up the frame timing
-         if( frame_sec == 59 && frame_msec >= 500 ) last_good = clock_freq;
-         else if( frame_sec == 60 && frame_msec < 500 ) last_good = clock_freq;
+         if( frame_sec == 59 && frame_msec >= 500 ) ;   // last_good = clock_freq;
+         else if( frame_sec == 60 && frame_msec < 500 ) ;  // last_good = clock_freq;
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0;  
-            clock_freq = last_good;   // lost sync, return to clock freq of last decode
+            FF = 0;             // clock_freq = last_good;   // lost sync, return to clock freq of last decode
          }
   }
   
@@ -496,8 +497,8 @@ long error;
 
    if( FreqCount.available() ){
        cal_result = (long)FreqCount.read();    // should FF affect time keeping only or freq drift too
-       result =  cal_result + (long)(FF);      // FF affects time keeping, clock adjustment
-       cal_result = result;                    // uncommented it also affects freq drift
+       result =  cal_result + (long)(FF/100);      // FF affects time keeping, clock adjustment
+       cal_result = result;                    // uncommented it also affects freq drift !!! FF now
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
@@ -532,7 +533,7 @@ int cnt;
    ++loops;
    
    if( last_error_count <= CLK_UPDATE_THRESHOLD ){
-       if( ++error_mod >= 5 ){
+       if( ++error_mod >= 3 ){
           ++last_error_count;   // relax the test threshold
           error_mod = 0;     
        }
@@ -563,8 +564,12 @@ int cnt;
    return last_time_error;    // return value for printing
 }
 
+void clock_correction( int8_t val ){    // time keeping only, change the fudge factor
 
-void clock_correction( int8_t val ){    // long term frequency correction to the master clock
+   FF += val;                           // 100 minutes to affect any change
+}
+/******************
+void clock_correction( int8_t val ){    // long term frequency correction to time fudge factor FF
 static int8_t time_trend;               // a change of +-100 is 1hz change
 uint8_t changed;                        // correct for seasonal temperature variations to clocks
                                         // using the WWVB time to arduino time errors
@@ -584,6 +589,7 @@ uint8_t changed;                        // correct for seasonal temperature vari
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
     }
 }
+********************/
 
 void temp_correction( ){    // short term drift correction with a linear map
 uint64_t local_drift;       // corrects for drift due to day/night temperature changes
