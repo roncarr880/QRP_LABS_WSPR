@@ -65,7 +65,7 @@ const uint32_t cal_freq = 3000000;   // calibrate frequency
 long cal_result;
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1470;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1460;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
@@ -400,7 +400,7 @@ int adj;
           Serial.write(val_print);
           Serial.print("  FF ");   Serial.print(FF);
           Serial.print("  Drift ");   Serial.print((int)drift/100);
-        //  Serial.print("  Correct_Count "); Serial.print(tm_correct_count);
+          Serial.print("  CC "); Serial.print(tm_correct_count);
           Serial.print("  Cal Freq "); Serial.print(cal_result);
           Serial.println();
       }
@@ -497,8 +497,9 @@ long error;
 
    if( FreqCount.available() ){
        cal_result = (long)FreqCount.read();    // should FF affect time keeping only or freq drift too
-       result =  cal_result + (long)(FF/100);      // FF affects time keeping, clock adjustment
-       cal_result = result;                    // uncommented it also affects freq drift !!! FF now
+       // cal_result = median( cal_result );      // median filter count values
+       result =  cal_result + (long)(FF/100);      // FF affects time keeping
+       cal_result = result;                    // uncommented it also affects freq drift
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
        else tm_correction = 0, error = 1500;                    // avoid divide by zero
@@ -515,6 +516,34 @@ long error;
        temp_correction();
    }  
 }
+
+/*
+long median( long val ){    // return the median of 3 values
+int i,j,k;
+static long vals[3];
+static int in;
+
+   // first time
+   if( vals[0] == 0 ){
+      vals[0] = vals[1] = vals[2] = val;
+      return val;
+   }
+
+   vals[in++] = val;
+   if( in > 2 ) in = 0;
+
+   i = 0, j = 1, k = 2;                      // assume in correct order low to high
+   if( vals[i] > vals[k] ) i = 2, k = 0;     // swap low and high
+   if( vals[j] < vals[i] ) j = i;            // mid val >= low val
+   if( vals[j] > vals[k] ) j = k;            // mid val <= high val
+
+   //Serial.print( vals[0] );   Serial.write(' ');
+   //Serial.print( vals[1] );   Serial.write(' ');
+   //Serial.print( vals[2] );   Serial.write(' ');
+   
+   return vals[j];
+}
+*/
 
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
@@ -533,7 +562,7 @@ int cnt;
    ++loops;
    
    if( last_error_count <= CLK_UPDATE_THRESHOLD ){
-       if( ++error_mod >= 3 ){
+       if( ++error_mod >= 1 ){
           ++last_error_count;   // relax the test threshold
           error_mod = 0;     
        }
@@ -561,7 +590,7 @@ int cnt;
   
        err = 60;    // use last_time info for the 2nd pass in the loop
    }
-   return last_time_error;    // return value for printing
+   return -(last_time_error);    // return value for printing
 }
 
 void clock_correction( int8_t val ){    // time keeping only, change the fudge factor
@@ -597,7 +626,6 @@ uint64_t local_drift;       // corrects for drift due to day/night temperature c
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
 
     local_drift = map( cal_result, 2999900, 3000000, 2000, 0 );
-//    local_drift = map( cal_result, 2999900, 3000000, 6000, 3500 );  // ?? jumped 10 hz on 40 meters for some reason
 
     if( local_drift != drift ){
        drift = local_drift;
