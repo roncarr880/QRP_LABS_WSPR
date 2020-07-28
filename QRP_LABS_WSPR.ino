@@ -684,7 +684,7 @@ static unsigned int one_second;
    
    if( (t - timer) < 683 ) return;   // baud time is 682.66666666 ms
    timer = t;
-   ++mod;   mod &= 3;
+   if( ++mod == 3 ) mod = 0;
    if( mod == 0 ) ++timer;    // delay 683, 683, 682, etc.
 
    if( i == 162 ){
