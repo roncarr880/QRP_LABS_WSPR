@@ -52,6 +52,7 @@
 int last_error_count = 60;
 char val_print = ' ';
 
+
   // using even dividers between 6 and 254 for lower jitter
   // freq range 2 to 150 without using the post dividers
   // we are using the post dividers and can receive down to 40khz
@@ -65,7 +66,7 @@ const uint32_t cal_freq = 3000000;   // calibrate frequency
 long cal_result;
 const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
-uint32_t audio_freq = 1460;          // wspr 1400 to 1600 offset from base vfo freq 
+uint32_t audio_freq = 1466;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
 uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
@@ -132,11 +133,11 @@ uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 1 for printing
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 
-//                                                      lose       |  gain   when clock at 27...4466
-// #define FF 0    // precalculated freq measure offset, -14  -9 -7 | -6 -5 -4  ( old algorithm values )
-                  // fudge factor for frequency counter result ( counting 3 mhz signal )
-                  // -12
-int FF = 0;      // try vary FF instead of the master clock freq                  
+#define FF 3       // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
+
+int ff = 0;        // self correcting fudge factor
+int dayFF,hourFF;   // for debug printing 
+              
 /***************************************************************************/
 
 void ee_save(){ 
@@ -389,7 +390,7 @@ int adj;
           if( ave_time < 100 ) Serial.write(' ');
           if( ave_time < 10 ) Serial.write(' ');
           Serial.print(ave_time);
-          Serial.print("  Adj");
+          Serial.print("  Ave");
           if( adj >= 0 ) Serial.write(' ');
           if( abs(adj) < 100 ) Serial.write(' ');
           if( abs(adj) < 10 ) Serial.write(' ');
@@ -398,7 +399,9 @@ int adj;
           if( ave_count < 10 ) Serial.write(' ');
           Serial.print(ave_count);
           Serial.write(val_print);
-          Serial.print("  FF ");   Serial.print(FF);
+          Serial.print("  FF "); Serial.print(ff);  
+          Serial.write(' ');  Serial.print(hourFF);
+          Serial.write(',');  Serial.print(dayFF);
           Serial.print("  Drift ");   Serial.print((int)drift/100);
           Serial.print("  CC "); Serial.print(tm_correct_count);
           Serial.print("  Cal Freq "); Serial.print(cal_result);
@@ -441,7 +444,7 @@ uint8_t i;
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0;  
-            FF = 0;             // clock_freq = last_good;   // lost sync, return to clock freq of last decode
+            ff = 0;             // reset timing fudge factor
          }
   }
   
@@ -496,9 +499,9 @@ long error;
    }
 
    if( FreqCount.available() ){
-       cal_result = (long)FreqCount.read();    // should FF affect time keeping only or freq drift too
+       cal_result = (long)FreqCount.read() + (long)FF;    
        // cal_result = median( cal_result );      // median filter count values
-       result =  cal_result + (long)(FF/100);      // FF affects time keeping
+       result =  cal_result + (long)(ff/100);     // FF and ff affects time keeping
        cal_result = result;                    // uncommented it also affects freq drift
        if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
        else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
@@ -516,6 +519,7 @@ long error;
        temp_correction();
    }  
 }
+
 
 /*
 long median( long val ){    // return the median of 3 values
@@ -550,33 +554,33 @@ static int in;
 int frame_sync(int err, long tm){
 int8_t t,i;
 static int last_time_error;
-//static int last_error_count = 60;  // made global for printing 
-static int error_mod;             // relax threshold each 10 ( or n ) 
+//static int last_error_count = 60;  // made global for printing  
 int loops;
 int cnt;
+int temp;
 
    // if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
-   cnt = 60 - err;                   // !!! convert and convert back, change function arg if this algorithm works
+   cnt = 60 - err;
    loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
    if( loops < 0 ) loops = -loops;
    ++loops;
-   
-   if( last_error_count <= CLK_UPDATE_THRESHOLD ){
-       if( ++error_mod >= 1 ){
-          ++last_error_count;   // relax the test threshold
-          error_mod = 0;     
-       }
-   }
+
+   if( last_error_count <= CLK_UPDATE_THRESHOLD )  ++last_error_count;   // relax the test threshold
+
+                    // average the values for large error counts
+   temp = ( tm < 500 ) ? tm : tm - 1000 ;
+   temp = last_time_average( temp, cnt );    
    
    for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
     
-       t = 0;
-       if( err < last_error_count ){     // signal better than the relaxing threshold
+       t = 0;                                        // signal better than the relaxing threshold ?
+
+       if( err < last_error_count ){
            t = ( tm < 500 ) ? -1 : 1 ;  
            if( tm == 0 ) t = 0;
-           last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;           // refresh correction amount
-           last_time_error += t;
-          last_time_error = constrain(last_time_error,-5*cnt,5*cnt);        // limit change for larger errors count
+           last_time_error = temp + t;
+           //if( cnt < 3 ) last_time_error >>= 3;      // small valid signals, limit time delta allowed
+           last_time_error = constrain(last_time_error,-5*cnt,5*cnt);  // limit change for larger errors count
            last_error_count = err;       // new threshold
            val_print = '*';
        }
@@ -590,12 +594,45 @@ int cnt;
   
        err = 60;    // use last_time info for the 2nd pass in the loop
    }
-   return -(last_time_error);    // return value for printing
+   
+   //return -(last_time_error);    // return value for printing
+   return -temp;
 }
 
-void clock_correction( int8_t val ){    // time keeping only, change the fudge factor
 
-   FF += val;                           // 100 minutes to affect any change
+int last_time_average( int val, int count ){    // average 8 values
+
+static int run_ave;     // weighted running average
+int wt;
+
+   if( run_ave > 0 ) --run_ave;        // leak toward zero
+   if( run_ave < 0 ) ++run_ave;
+   
+   wt = ( count > 8 ) ? 8 : count;
+   run_ave = ( 8 - wt ) * run_ave + wt * val;
+   run_ave >>= 3;
+   
+   return run_ave;
+
+}
+
+
+void clock_correction( int8_t val ){    // time keeping only, change the fudge factor
+static int hr;
+static int day;
+static int lasthr;              // double buffer, value printed is 1 to 2 hours old
+static int lastday[24];         // 24 hour delay line for day old data
+static int dayin;
+
+   ff += val;
+   if( ++hr >= 60 ){
+     hr = 0;
+     hourFF = lasthr;            // FF history for printing, only correct when Adj is less than 100
+     lasthr = ff;
+     if( ++dayin >= 24 ) dayin = 0;
+     dayFF = lastday[dayin];
+     lastday[dayin] = ff;
+   }
 }
 /******************
 void clock_correction( int8_t val ){    // long term frequency correction to time fudge factor FF
