@@ -47,6 +47,7 @@
 //#define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
 #define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 46    // 2nd algorithm
+#define SUB_ERROR 1                 // 1 = compensates for weak signal arriving late ?
 
 #define stage(c) Serial.write(c)
 
@@ -288,7 +289,7 @@ static int temp;            // just for flashing the LED when there is I2C activ
 
        if( wspr_tx_enable || wspr_tx_cancel ) wspr_tx(ms);
        if( cal_enable ) run_cal();
-       // wwvb_sample(ms);
+       //wwvb_sample(ms);
        wwvb_sample2(ms);
        if( temp  ){
          if( temp > 100 ) temp = 100;
@@ -300,122 +301,6 @@ static int temp;            // just for flashing the LED when there is I2C activ
 
 }
 
-
-//   sample the wwvb signal and detect bits, syncs, and errors
-void wwvb_sample(unsigned long t){
-static unsigned long old_t;
-int loops;
-static uint8_t bounce;
-static uint8_t state;
-static long ms;
-static unsigned int low_counter;
-static unsigned int high_counter;
-static long ave_time;
-static long ave_count;
-uint8_t b,s,e;
-int adj;
-// int clock_adj_sum;
-static uint64_t wwvb_data, wwvb_sync, wwvb_errors;  // defeat this algorithm by not using the globals
-
-  loops = t - old_t;
-  old_t = t;
-   
-  while( loops-- ){   // repeat for any missed milliseconds
-
-   bounce <<= 1;
-   if( digitalRead(WWVB_OUT) == HIGH ) bounce |= 1;     // debounce, looking for zero or 255 value
-   ++ms;
-   
-   switch(state){
-      case 0:                          // looking for a low signal
-         ++high_counter;
-   
-         if( bounce == 0 ){            // found the low,  decode the bit for the previous second
-            state = 1;
-            b = s = e = 0;
-            high_counter += low_counter;                                 // get total frame ms
-            if( high_counter < 800 || high_counter > 1200 ) e = 1;       // too short or too long
-            
-            if( low_counter > 100 && low_counter < 300 ) b = 0;          // decode the bit
-            else if( low_counter > 400 && low_counter < 600 ) b = 1;
-            else if( low_counter > 700 && low_counter < 900 ) s = 1;
-            else e = 1;                                                  // no valid decode
-            
-            low_counter = 0;
-            
-            wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
-            wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
-            wwvb_errors <<= 1; wwvb_errors |= e;  // errors
-            
-        // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
-        // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
-        // use the old bits to see the double sync bits at 0 of this minute
-        // and 59 seconds of the previous minute.  This decodes at zero time rather than some
-        // algorithms that decode at 1 second past.
-           if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
-             if( wwvb_errors == 0 ){    // decode if no bit errors
-              // wwvb_decode();         // not used if commented
-             }
-           }            
-
-            //  gather some stats for printing
-           if( e == 0 ){
-              ave_time += frame_msec;
-              if( frame_msec >= 500 ) ave_time -= 1000;      // 500-999 averaged in as -(1000-frame_msec)
-              ++ave_count;                                   // implemented as +frame_msec - 1000
-           }
-         }
-      break;
-      case 1:                          // looking for a high signal
-         ++low_counter;
-         if( bounce == 255 ){
-            state = 0;
-            high_counter = 0;
-         }
-
-      break;
-   }
-
-   if( ms >= 60000 ){                   // print out some stats if in printing mode
-      
-      if( ave_count ){
-         ave_time = ave_time/ave_count;
-         if( ave_time < 0 ) ave_time += 1000;
-      }
-
-      val_print = ' ';
-      adj = frame_sync( 60-ave_count, ave_time );      // sync our seconds to wwvb falling edge signal
-      
-      // debug print out some stats when in test mode
-      if( wwvb_quiet == 1 && ave_count != 0 ){   
-          //clock_adj_sum = clock_freq - START_CLOCK_FREQ;    
-          Serial.print("Tm "); 
-          if( ave_time < 100 ) Serial.write(' ');
-          if( ave_time < 10 ) Serial.write(' ');
-          Serial.print(ave_time);
-          Serial.print("  Ave");
-          if( adj >= 0 ) Serial.write(' ');
-          if( abs(adj) < 100 ) Serial.write(' ');
-          if( abs(adj) < 10 ) Serial.write(' ');
-          Serial.print(adj);
-          Serial.print("  Valid ");
-          if( ave_count < 10 ) Serial.write(' ');
-          Serial.print(ave_count);
-          Serial.write(val_print);
-          Serial.print("  FF "); Serial.print(ff);  
-          Serial.write(' ');  Serial.print(hourFF);
-          Serial.write(',');  Serial.print(dayFF);
-          Serial.print("  Drift ");   Serial.print((int)drift/100);
-          Serial.print("  CC "); Serial.print(tm_correct_count);
-          Serial.print("  Cal Freq "); Serial.print(cal_result);
-          Serial.println();
-      }
-        // reset the stats for the next minute
-      ms = ave_count = ave_time = 0;
-   }
-
-  }      // loops - repeat for lost milliseconds if any
-}
 
 
 void wwvb_decode(){   // WWVB transmits the data for the previous minute just ended
@@ -524,102 +409,6 @@ long error;
 }
 
 
-/*
-long median( long val ){    // return the median of 3 values
-int i,j,k;
-static long vals[3];
-static int in;
-
-   // first time
-   if( vals[0] == 0 ){
-      vals[0] = vals[1] = vals[2] = val;
-      return val;
-   }
-
-   vals[in++] = val;
-   if( in > 2 ) in = 0;
-
-   i = 0, j = 1, k = 2;                      // assume in correct order low to high
-   if( vals[i] > vals[k] ) i = 2, k = 0;     // swap low and high
-   if( vals[j] < vals[i] ) j = i;            // mid val >= low val
-   if( vals[j] > vals[k] ) j = k;            // mid val <= high val
-
-   //Serial.print( vals[0] );   Serial.write(' ');
-   //Serial.print( vals[1] );   Serial.write(' ');
-   //Serial.print( vals[2] );   Serial.write(' ');
-   
-   return vals[j];
-}
-*/
-
-// adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
-// wwvb signal.
-int frame_sync(int err, long tm){
-int8_t t,i;
-static int last_time_error;
-//static int last_error_count = 60;  // made global for printing  
-int loops;
-int cnt;
-int temp;
-
-   // if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
-   cnt = 60 - err;
-   loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
-   if( loops < 0 ) loops = -loops;
-   ++loops;
-
-   if( last_error_count <= CLK_UPDATE_THRESHOLD )  ++last_error_count;   // relax the test threshold
-
-                    // average the values for large error counts
-   temp = ( tm < 500 ) ? tm : tm - 1000 ;
-   temp = last_time_average( temp, cnt );    
-   
-   for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
-    
-       t = 0;                                        // signal better than the relaxing threshold ?
-
-       if( err < last_error_count ){
-           t = ( tm < 500 ) ? -1 : 1 ;  
-           if( tm == 0 ) t = 0;
-           last_time_error = temp + t;
-           //if( cnt < 3 ) last_time_error >>= 3;      // small valid signals, limit time delta allowed
-           last_time_error = constrain(last_time_error,-5*cnt,5*cnt);  // limit change for larger errors count
-           last_error_count = err;       // new threshold
-           val_print = '*';
-       }
-
-       if( t == 0 ){       // use old data for the correction amount
-          if( last_time_error > 0 ) last_time_error--, t = -1;
-          if( last_time_error < 0 ) last_time_error++, t = 1;
-       }
-
-       //   tm_correction2 += t;
-       //   clock_correction( t );  // long term clock drift correction
-
-       err = 60;    // use last_time info for the 2nd pass in the loop
-   }
-   
-   //return -(last_time_error);    // return value for printing
-   return temp;
-}
-
-
-int last_time_average( int val, int count ){    // average 8 values
-
-static int run_ave;     // weighted running average
-int wt;
-
-   if( run_ave > 0 ) --run_ave;        // leak toward zero
-   if( run_ave < 0 ) ++run_ave;
-   
-   wt = ( count > 8 ) ? 8 : count;
-   run_ave = ( 8 - wt ) * run_ave + wt * val;
-   run_ave >>= 3;
-   
-   return run_ave;
-
-}
-
 
 void clock_correction( int8_t val ){    // time keeping only, change the fudge factor
 static int hr;
@@ -638,28 +427,6 @@ static int dayin;
      lastday[dayin] = ff;
    }
 }
-/******************
-void clock_correction( int8_t val ){    // long term frequency correction to time fudge factor FF
-static int8_t time_trend;               // a change of +-100 is 1hz change
-uint8_t changed;                        // correct for seasonal temperature variations to clocks
-                                        // using the WWVB time to arduino time errors
-    if( wspr_tx_enable ) return;                                // ignore this when transmitting
-    
-    time_trend -= val;             // or should it be += val;
-
-    changed = 0;
-    if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;  
-    if( time_trend <= -CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1;
-    
-    if( changed ){    // set new dividers for the new master clock freq value to take effect
-       time_trend = 0;
-       if( clock_freq > 2700486600ULL ) clock_freq -= 100;   // stay within some bounds, +- 400
-       if( clock_freq < 2700406600ULL ) clock_freq += 100;   // +- 100 at 7mhz
-       si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
-       si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
-    }
-}
-********************/
 
 void temp_correction( ){    // short term drift correction with a linear map
 uint64_t local_drift;       // corrects for drift due to day/night temperature changes
@@ -1267,6 +1034,7 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
                late_count = 0;
            }
 
+           val_print = ' ';
            if( ++late_count > 60 ){
                frame_sync2( CLK_UPDATE_THRESHOLD2 - 1, late_time );   // fake good sync up
                if( wwvb_quiet == 1 ){ Serial.print(late_time); Serial.write(' '); }
@@ -1294,7 +1062,7 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
                       
            dither = ( errors >> 4 ) + 1;
            early = late = secs = errors = 0;   // reset the stats for the next minute
-           val_print = ' ';
+
         }
 
       }  // end decode time    
@@ -1350,8 +1118,10 @@ int loops;
 int cnt;
 // static uint64_t wwvb_data, wwvb_sync, wwvb_errors;  // defeat this algorithm by not using the globals
 
+   tm = tm - SUB_ERROR * ( err >> 2 );
+   if( tm < 0 ) tm += 1000;
 
-   if( tm > 990 || tm < 10 ) tm = 0; // deadband for clock corrections
+   // if( tm > 990 || tm < 10 ) tm = 0; // deadband for clock corrections
    loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
    if( loops < 0 ) loops = -loops;
    ++loops;
@@ -1387,5 +1157,237 @@ int cnt;
 }
 
 /*************************** some old code with interesting algorithms ****************************
+//   sample the wwvb signal and detect bits, syncs, and errors
+void wwvb_sample(unsigned long t){
+static unsigned long old_t;
+int loops;
+static uint8_t bounce;
+static uint8_t state;
+static long ms;
+static unsigned int low_counter;
+static unsigned int high_counter;
+static long ave_time;
+static long ave_count;
+uint8_t b,s,e;
+int adj;
+// int clock_adj_sum;
+static uint64_t wwvb_data, wwvb_sync, wwvb_errors;  // defeat this algorithm by not using the globals
+
+  loops = t - old_t;
+  old_t = t;
+   
+  while( loops-- ){   // repeat for any missed milliseconds
+
+   bounce <<= 1;
+   if( digitalRead(WWVB_OUT) == HIGH ) bounce |= 1;     // debounce, looking for zero or 255 value
+   ++ms;
+   
+   switch(state){
+      case 0:                          // looking for a low signal
+         ++high_counter;
+   
+         if( bounce == 0 ){            // found the low,  decode the bit for the previous second
+            state = 1;
+            b = s = e = 0;
+            high_counter += low_counter;                                 // get total frame ms
+            if( high_counter < 800 || high_counter > 1200 ) e = 1;       // too short or too long
+            
+            if( low_counter > 100 && low_counter < 300 ) b = 0;          // decode the bit
+            else if( low_counter > 400 && low_counter < 600 ) b = 1;
+            else if( low_counter > 700 && low_counter < 900 ) s = 1;
+            else e = 1;                                                  // no valid decode
+            
+            low_counter = 0;
+            
+            wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
+            wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
+            wwvb_errors <<= 1; wwvb_errors |= e;  // errors
+            
+        // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
+        // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
+        // use the old bits to see the double sync bits at 0 of this minute
+        // and 59 seconds of the previous minute.  This decodes at zero time rather than some
+        // algorithms that decode at 1 second past.
+           if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
+             if( wwvb_errors == 0 ){    // decode if no bit errors
+              // wwvb_decode();         // not used if commented
+             }
+           }            
+
+            //  gather some stats for printing
+           if( e == 0 ){
+              ave_time += frame_msec;
+              if( frame_msec >= 500 ) ave_time -= 1000;      // 500-999 averaged in as -(1000-frame_msec)
+              ++ave_count;                                   // implemented as +frame_msec - 1000
+           }
+         }
+      break;
+      case 1:                          // looking for a high signal
+         ++low_counter;
+         if( bounce == 255 ){
+            state = 0;
+            high_counter = 0;
+         }
+
+      break;
+   }
+
+   if( ms >= 60000 ){                   // print out some stats if in printing mode
+      
+      if( ave_count ){
+         ave_time = ave_time/ave_count;
+         if( ave_time < 0 ) ave_time += 1000;
+      }
+
+      val_print = ' ';
+      adj = frame_sync( 60-ave_count, ave_time );      // sync our seconds to wwvb falling edge signal
+      
+      // debug print out some stats when in test mode
+      if( wwvb_quiet == 1 && val_print == '*'){   
+          //clock_adj_sum = clock_freq - START_CLOCK_FREQ;    
+          Serial.print("Tm "); 
+          if( ave_time < 100 ) Serial.write(' ');
+          if( ave_time < 10 ) Serial.write(' ');
+          Serial.print(ave_time);
+          Serial.print("  Ave");
+          if( adj >= 0 ) Serial.write(' ');
+          if( abs(adj) < 100 ) Serial.write(' ');
+          if( abs(adj) < 10 ) Serial.write(' ');
+          Serial.print(adj);
+          Serial.print("  Valid ");
+          if( ave_count < 10 ) Serial.write(' ');
+          Serial.print(ave_count);
+          Serial.write(val_print);
+          Serial.print("  FF "); Serial.print(ff);  
+          Serial.write(' ');  Serial.print(hourFF);
+          Serial.write(',');  Serial.print(dayFF);
+          Serial.print("  Drift ");   Serial.print((int)drift/100);
+          Serial.print("  CC "); Serial.print(tm_correct_count);
+          Serial.print("  Cal Freq "); Serial.print(cal_result);  
+          Serial.println();
+      }
+        // reset the stats for the next minute
+      ms = ave_count = ave_time = 0;
+   }
+
+  }      // loops - repeat for lost milliseconds if any
+}
+
+
+long median( long val ){    // return the median of 3 values
+int i,j,k;
+static long vals[3];
+static int in;
+
+   // first time
+   if( vals[0] == 0 ){
+      vals[0] = vals[1] = vals[2] = val;
+      return val;
+   }
+
+   vals[in++] = val;
+   if( in > 2 ) in = 0;
+
+   i = 0, j = 1, k = 2;                      // assume in correct order low to high
+   if( vals[i] > vals[k] ) i = 2, k = 0;     // swap low and high
+   if( vals[j] < vals[i] ) j = i;            // mid val >= low val
+   if( vals[j] > vals[k] ) j = k;            // mid val <= high val
+
+   //Serial.print( vals[0] );   Serial.write(' ');
+   //Serial.print( vals[1] );   Serial.write(' ');
+   //Serial.print( vals[2] );   Serial.write(' ');
+   
+   return vals[j];
+}
+
+
+// adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
+// wwvb signal.
+int frame_sync(int err, long tm){
+int8_t t,i;
+static int last_time_error;
+//static int last_error_count = 60;  // made global for printing  
+int loops;
+int cnt;
+int temp;
+
+   if( tm > 980 || tm < 20 ) tm = 0; // deadband for clock corrections
+   cnt = 60 - err;
+   loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
+   if( loops < 0 ) loops = -loops;
+   ++loops;
+
+   if( last_error_count <= CLK_UPDATE_THRESHOLD )  ++last_error_count;   // relax the test threshold
+
+                    // average the values for large error counts
+   temp = ( tm < 500 ) ? tm : tm - 1000 ;
+   temp = last_time_average( temp, cnt );    
+   
+   for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
+    
+       t = 0;                                        // signal better than the relaxing threshold ?
+
+       if( err < last_error_count ){
+           t = ( tm < 500 ) ? -1 : 1 ;  
+           if( tm == 0 ) t = 0;
+           last_time_error = temp + t;
+           //if( cnt < 3 ) last_time_error >>= 3;      // small valid signals, limit time delta allowed
+           last_time_error = constrain(last_time_error,-5*cnt,5*cnt);  // limit change for larger errors count
+           last_error_count = err;       // new threshold
+           val_print = '*';
+       }
+
+       if( t == 0 ){       // use old data for the correction amount
+          if( last_time_error > 0 ) last_time_error--, t = -1;
+          if( last_time_error < 0 ) last_time_error++, t = 1;
+       }
+
+          tm_correction2 += t;
+          clock_correction( t );  // long term clock drift correction
+
+       err = 60;    // use last_time info for the 2nd pass in the loop
+   }
+   
+   //return -(last_time_error);    // return value for printing
+   return temp;
+}
+
+
+int last_time_average( int val, int count ){    // average 8 values
+
+static int run_ave;     // weighted running average
+int wt;
+
+   if( run_ave > 0 ) --run_ave;        // leak toward zero
+   if( run_ave < 0 ) ++run_ave;
+   
+   wt = ( count > 8 ) ? 8 : count;
+   run_ave = ( 8 - wt ) * run_ave + wt * val;
+   run_ave >>= 3;
+   
+   return run_ave;
+
+}
+
+void clock_correction( int8_t val ){    // long term frequency correction to time fudge factor FF
+static int8_t time_trend;               // a change of +-100 is 1hz change
+uint8_t changed;                        // correct for seasonal temperature variations to clocks
+                                        // using the WWVB time to arduino time errors
+    if( wspr_tx_enable ) return;                                // ignore this when transmitting
+    
+    time_trend -= val;             // or should it be += val;
+
+    changed = 0;
+    if( time_trend >= CLK_UPDATE_MIN ) clock_freq += CLK_UPDATE_AMT, changed = 1;  
+    if( time_trend <= -CLK_UPDATE_MIN ) clock_freq -= CLK_UPDATE_AMT, changed = 1;
+    
+    if( changed ){    // set new dividers for the new master clock freq value to take effect
+       time_trend = 0;
+       if( clock_freq > 2700486600ULL ) clock_freq -= 100;   // stay within some bounds, +- 400
+       if( clock_freq < 2700406600ULL ) clock_freq += 100;   // +- 100 at 7mhz
+       si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
+       si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
+    }
+}
 
 **************************************************************************************************/
