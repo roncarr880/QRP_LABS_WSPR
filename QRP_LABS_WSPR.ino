@@ -47,7 +47,8 @@
 //#define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
 #define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 46    // 2nd algorithm
-#define SUB_ERROR 1                 // 1 = compensates for weak signal arriving late ?
+#define SUB_ERROR 0                 // maybe account for time error of weak wwvb signal when defined as 1
+#define DEADBAND 20
 
 #define stage(c) Serial.write(c)
 
@@ -134,12 +135,23 @@ uint8_t wwvb_last_err;   // display last error character received ( will show wh
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
+uint8_t tick;         // start each minute
 
 #define FF 3       // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
 
 int ff = 0;        // self correcting fudge factor
 int dayFF,hourFF;   // for debug printing 
-              
+
+// date, time keeping
+int gmon = 1,gday = 1,gyr = 20,ghr,gmin;
+int tot_days = 1;
+uint16_t leap = 1;
+
+#define TK 4        // keep time has been run
+#define TS 2        // time was set from WWVB decode
+#define TP 1        // print decode indicator
+uint8_t time_flags; // WWVB decodes the previous minute, flags to print the correct time
+
 /***************************************************************************/
 
 void ee_save(){ 
@@ -301,7 +313,22 @@ static int temp;            // just for flashing the LED when there is I2C activ
 
 }
 
+void calc_date(){    // from total days and leap flag
+const int cal[2][12] =  
+   { 31,28,31,30,31,30,31,31,30,31,30,31,
+     31,29,31,30,31,30,31,31,30,31,30,31 };
+int i,d;
 
+   d = tot_days;
+   for( i = 0; i < 12; ++i ){
+      if( d <= cal[leap][i] ) break;
+      d -= cal[leap][i];
+   }
+     
+   gmon = i + 1;
+   gday = d;
+  
+}
 
 void wwvb_decode(){   // WWVB transmits the data for the previous minute just ended
 uint16_t tmp;
@@ -323,12 +350,13 @@ uint8_t i;
   dy = wwvb_decode2( 33, 0xfff );   // day is 0 to 365
   hr = wwvb_decode2( 18, 0x3f );
   mn = wwvb_decode2( 8, 0xff );
+  leap = wwvb_decode2( 55, 0x1 );
 
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
                             // only apply clock corrections in the middle of the two minute frame or may
                             // otherwise mess up the frame timing
-         if( frame_sec == 59 && frame_msec >= 500 ) ;   // last_good = clock_freq;
-         else if( frame_sec == 60 && frame_msec < 500 ) ;  // last_good = clock_freq;
+         if( frame_sec == 59 && frame_msec >= 500 ) ;   // ok
+         else if( frame_sec == 60 && frame_msec < 500 ) ;  // ok
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0;  
@@ -337,17 +365,23 @@ uint8_t i;
   }
   
   if( wwvb_quiet == 1 ){    // wwvb logging mode
-     Serial.print(decodes);
-     Serial.write(' ');  Serial.print(tmp2); Serial.write('.'); Serial.print(tmp);   // show jitter
-     Serial.print(" WWVB "); 
-     Serial.print("20");                        // the year 2100 bug
-     Serial.print( yr );  Serial.write(' ');
-     Serial.print( dy );  Serial.write(' ');
-     Serial.print( hr );  Serial.write(':');
-     if( mn < 10 ) Serial.write('0');
-     Serial.println(mn);  // Serial.write(' ');
-    // Serial.print((unsigned long)( clock_freq / 100LL) );
+    // Serial.print(decodes);
+    // Serial.write(' ');  Serial.print(tmp2); Serial.write('.'); Serial.print(tmp);   // show jitter
+    // Serial.print(" WWVB "); 
+    // Serial.print("20");                        // the year 2100 bug
+    // Serial.print( yr );  Serial.write(' ');
+    // Serial.print( dy );  Serial.write(' ');
+    // Serial.print( hr );  Serial.write(':');
+    // if( mn < 10 ) Serial.write('0');
+    // Serial.println(mn);
   }
+
+  ghr = hr;
+  gmin = mn;
+  gyr = yr;
+  tot_days = dy;
+  calc_date( );
+  time_flags |= TS;
 
 }
 
@@ -471,8 +505,29 @@ static long time_adjust;
         if( slot == 1 && operate_mode == FRAME_MODE ) wspr_tx_enable = 1;
       }
       if( frame_sec == 116 ) cal_enable = 1;   // do once per slot in wspr quiet time
+      if( frame_sec == 90 || frame_sec == 30 ) keep_time();   // half minute to avoid colliding with wwvb decodes
+      if( frame_sec ==  0 || frame_sec == 60 ) tick = 1;      // print wwvb decode info if enabled
    } 
 }
+
+void keep_time(){
+
+   
+   if( ++gmin >= 60 ){
+      gmin = 0;
+      if( ++ghr >= 24 ){
+         ghr = 0;
+         ++tot_days;
+         if( tot_days > 365 + leap ) ++gyr, tot_days = 1;
+         calc_date();
+      }
+   }
+  
+   if( time_flags & TS ) time_flags = TP + TK;     // clear TS but flag a print of wwvb decode indicator
+   else  time_flags = TK;
+
+}
+
 
 void wspr_tx( unsigned long t ){
 static int i;
@@ -950,6 +1005,8 @@ static uint8_t delay_counter;
 // each second starts with a low signal and ends with a high signal
 // much like software sampling rs232 start and stop bits.
 // this routine runs fast by design until it locks on the wwvb signal
+// if more than 30 seconds out of sync with the frame timer, then the time printed may be incorrect
+// but that may take days and the time is only printed in debug mode
 // this original version seems to work better in noise than the 2nd version
 void wwvb_sample2(unsigned long t){
 static unsigned long old_t;
@@ -1021,8 +1078,9 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
           }
         }
 
-        if( ++secs >= 60 ){  //  adjust dither each minute
+        if( ++secs >= 64 || tick ){  //  adjust dither each minute
 
+           tick = 0;
            if( errors >= CLK_UPDATE_THRESHOLD2 ){
               if( late >= late_late ){
                    late_late = late;
@@ -1042,10 +1100,17 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
            }
            else frame_sync2( errors,frame_msec );
            
-                 // debug print out some stats when in test mode
-           if( wwvb_quiet == 1 ){       
-               Serial.print("Tm2 "); Serial.print(frame_msec);
-               //Serial.write(','); Serial.print(tm);
+           // running in print,       wwvb decode,   keep_time order    or
+           //         in wwvb decode, print,         keep_time order    this case needs a time update
+           if( time_flags & TS ) keep_time();  // need to increment the time since the last decode
+    
+                 // debug print out some stats when in test mode                
+           if( wwvb_quiet == 1 ){
+               print_date_time();       
+               Serial.write(' '); 
+               if( frame_msec < 100 ) Serial.write('0');
+               if( frame_msec < 10 ) Serial.write('0');
+               Serial.print(frame_msec);
                Serial.print("  Err "); Serial.print(errors); Serial.write(val_print);
                Serial.print("  Clk ");  Serial.print(early);
                Serial.write(',');   Serial.print(late);
@@ -1059,7 +1124,9 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
                Serial.println();
            }
            else print_stats(0);
-                      
+
+           time_flags = 0;
+           
            dither = ( errors >> 4 ) + 1;
            early = late = secs = errors = 0;   // reset the stats for the next minute
 
@@ -1068,6 +1135,25 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
       }  // end decode time    
     }    // end integration timer
   }      // loops - repeat for lost milliseconds if any
+}
+
+void print_date_time(){
+
+   if( gmon < 10 ) Serial.write('0');
+   Serial.print(gmon);  Serial.write('/');
+   if( gday < 10 ) Serial.write('0');
+   Serial.print(gday);  Serial.write('/');
+   if( gyr < 10 ) Serial.write('0');
+   Serial.print(gyr);  Serial.write(' ');
+
+   if( ghr < 10 ) Serial.write('0');
+   Serial.print(ghr);   Serial.write(':');
+   if( gmin < 10 ) Serial.write('0');
+   Serial.print(gmin);
+
+   if( time_flags & TP ) Serial.write('*');
+   else Serial.write(' ');
+  
 }
 
 void gather_stats( uint8_t data, uint8_t err ){
@@ -1118,11 +1204,11 @@ int loops;
 int cnt;
 // static uint64_t wwvb_data, wwvb_sync, wwvb_errors;  // defeat this algorithm by not using the globals
 
-   tm = tm - SUB_ERROR * ( err >> 2 );
+   tm = tm - SUB_ERROR * ( err >> 1 );
    if( tm < 0 ) tm += 1000;
 
-   // if( tm > 990 || tm < 10 ) tm = 0; // deadband for clock corrections
-   loops = last_time_error/100;      // loop 1,2,3,4 or 5 times for error <100, <200, <300, <400, <500
+   if( tm > 1000 - DEADBAND || tm < DEADBAND ) tm = 0; // deadband for clock corrections
+   loops = last_time_error/100;      // loop 1,2,3,4,5 times for error <100, <200, <300, <400, <500 
    if( loops < 0 ) loops = -loops;
    ++loops;
 
