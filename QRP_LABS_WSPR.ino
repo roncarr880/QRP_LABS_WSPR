@@ -137,10 +137,9 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 uint8_t tick;         // start each minute
 
-#define FF 3       // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
+int FF = 3;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
+int ff = 0;        // fractional part of the fudge factor ( floats not useful as limited in significant figures )
 
-int ff = 0;        // self correcting fudge factor
-int dayFF,hourFF;   // for debug printing 
 
 // date, time keeping
 int gmon = 1,gday = 1,gyr = 20,ghr,gmin;
@@ -360,7 +359,7 @@ uint8_t i;
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0;  
-            ff = 0;             // reset timing fudge factor
+            FF = 3, ff = 0;             // reset timing fudge factor
          }
   }
   
@@ -411,8 +410,7 @@ uint16_t val;
 // this seems to be working very well with no change in WSPR received delta time for over 48 hours.
 void run_cal(){    // count pulses on clock 2 wired to pin 5
                    // IMPORTANT: jumper W4 to W7 on the arduino shield
-long result;
-long error;
+long error1,error2;
 
 
    if( cal_enable == 1 ){
@@ -421,15 +419,25 @@ long error;
    }
 
    if( FreqCount.available() ){
-       cal_result = (long)FreqCount.read() + (long)FF;    
-       // cal_result = median( cal_result );      // median filter count values
-       result =  cal_result + (long)(ff/100);     // FF and ff affects time keeping
-       cal_result = result;                    // uncommented it also affects freq drift
-       if( result < 3000000L ) tm_correction = -1, error = 3000000L - result;
-       else if( result > 3000000L ) tm_correction =  1, error = result - 3000000L;
-       else tm_correction = 0, error = 1500;                    // avoid divide by zero
-       if( error < 2000 ) tm_correct_count =  3000000L / error ;
-       else tm_correction = 0;                   // defeat correction if freq counted is obviously wrong
+       cal_result = (long)FreqCount.read() + (long)FF;
+       tm_correction = 0;                   // default
+       if( cal_result > 2999996L && cal_result < 3000004 )tm_correction = 0, tm_correct_count = 30000;
+       else{
+          if( cal_result < 3000000L ){
+            tm_correction = -1, error1 = 3000000L - cal_result;
+            error2 = error1 - 1;
+          }
+          else if( cal_result > 3000000L ){
+            tm_correction =  1, error1 = cal_result - 3000000L;
+            error2 = error1 + 1;
+          }
+
+          if( error1 != 0 ) error1 = 3000000L / error1;
+          if( error2 != 0 ) error2 = 3000000L / error2;
+
+          tm_correct_count = interpolate( error1,error2,ff );
+       }
+                
        if( wwvb_quiet == 1 && tm_correction == 0 ){    // wwvb logging mode
         // Serial.print( result );   Serial.write(' ');
         //  Serial.print( error );    Serial.write(' ');
@@ -443,23 +451,24 @@ long error;
 }
 
 
+// amt is a value from 0 to 99 representing the percentage
+long interpolate( long val1, long val2, int amt ){
+long diff;
+long result;
+
+    diff = val2 - val1;
+    result = (diff * amt) / 100;
+    result += val1;
+    // Serial.print( val1 );  Serial.write(' ');  Serial.print( val2 ); Serial.write(' ');
+    return result;
+}
 
 void clock_correction( int8_t val ){    // time keeping only, change the fudge factor
-static int hr;
-static int day;
-static int lasthr;              // double buffer, value printed is 1 to 2 hours old
-static int lastday[24];         // 24 hour delay line for day old data
-static int dayin;
 
-   ff += val;
-   if( ++hr >= 60 ){
-     hr = 0;
-     hourFF = lasthr;            // FF history for printing, only correct when Adj is less than 100
-     lasthr = ff;
-     if( ++dayin >= 24 ) dayin = 0;
-     dayFF = lastday[dayin];
-     lastday[dayin] = ff;
-   }
+   ff += val;                           // val is always -1,0,or 1
+   if( ff >= 100 ) ff = 0, ++FF;        // keep ff in 0 to 99 range
+   if( ff < 0 ) ff = 99, --FF;
+
 }
 
 void temp_correction( ){    // short term drift correction with a linear map
@@ -1115,12 +1124,11 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
                Serial.print("  Clk ");  Serial.print(early);
                Serial.write(',');   Serial.print(late);
                print_stats(1);
-               Serial.print("  FF "); Serial.print(ff);  
-               Serial.write(' ');  Serial.print(hourFF);
-               Serial.write(',');  Serial.print(dayFF);
+               Serial.print("  FF "); Serial.print(FF);  
+               Serial.write(' ');  Serial.print(ff);
                Serial.print("  Drift ");   Serial.print((int)drift/100);
                Serial.print("  CC "); Serial.print(tm_correct_count);
-               Serial.print("  Cal Freq "); Serial.print(cal_result);
+               Serial.print("  Cal "); Serial.print(cal_result);
                Serial.println();
            }
            else print_stats(0);
