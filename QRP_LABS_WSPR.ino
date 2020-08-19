@@ -47,8 +47,8 @@
 //#define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
 #define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 46    // 2nd algorithm
-#define SUB_ERROR 0                 // maybe account for time error of weak wwvb signal when defined as 1
-#define DEADBAND 20
+// #define SUB_ERROR 0                 // maybe account for time error of weak wwvb signal when defined as 1
+#define DEADBAND 10                 // signal deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -1212,10 +1212,10 @@ int loops;
 int cnt;
 // static uint64_t wwvb_data, wwvb_sync, wwvb_errors;  // defeat this algorithm by not using the globals
 
-   tm = tm - SUB_ERROR * ( err >> 1 );
-   if( tm < 0 ) tm += 1000;
-
+  // tm = tm - SUB_ERROR * ( err >> 1 );
+  // if( tm < 0 ) tm += 1000;
    if( tm > 1000 - DEADBAND || tm < DEADBAND ) tm = 0; // deadband for clock corrections
+  
    loops = last_time_error/100;      // loop 1,2,3,4,5 times for error <100, <200, <300, <400, <500 
    if( loops < 0 ) loops = -loops;
    ++loops;
@@ -1230,10 +1230,11 @@ int cnt;
        if( err < last_error_count ){
            t = ( tm < 500 ) ? -1 : 1 ;  
            if( tm == 0 ) t = 0;
+           
+           cnt = CLK_UPDATE_THRESHOLD2 - err + 1; 
            last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;
-          cnt = CLK_UPDATE_THRESHOLD2 - err + 1; 
-          last_time_error = constrain(last_time_error,-10*cnt,10*cnt);
-           last_time_error += t;
+           last_time_error = constrain(last_time_error,-10*cnt,10*cnt);
+           // last_time_error += t;
            last_error_count = err;       // new threshold
            val_print = '*';
        }
