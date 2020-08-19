@@ -1219,6 +1219,7 @@ int cnt;
    loops = last_time_error/100;      // loop 1,2,3,4,5 times for error <100, <200, <300, <400, <500 
    if( loops < 0 ) loops = -loops;
    ++loops;
+   if( err < CLK_UPDATE_THRESHOLD2 ) ++loops;        // to process both the single and multi time adjustments
 
    if( last_error_count < CLK_UPDATE_THRESHOLD2 )  ++last_error_count;   // relax the test threshold
    
@@ -1227,7 +1228,7 @@ int cnt;
     
        t = 0;                                        // signal better than the relaxing threshold ?
 
-       if( err < last_error_count ){
+       if( err < last_error_count ){                 // looped time adjustment
            t = ( tm < 500 ) ? -1 : 1 ;  
            if( tm == 0 ) t = 0;
            
@@ -1237,6 +1238,12 @@ int cnt;
            // last_time_error += t;
            last_error_count = err;       // new threshold
            val_print = '*';
+       }
+       else if( err < CLK_UPDATE_THRESHOLD2 ){       // single time adjustment when locked out by last_error_count
+           t = ( tm < 500 ) ? -1 : 1 ;  
+           if( tm == 0 ) t = 0;
+           if( t == 1 ) val_print = '>';
+           if( t == -1 ) val_print = '<';  
        }
 
        if( t == 0 ){       // use old data for the correction amount
