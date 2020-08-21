@@ -39,16 +39,10 @@
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
+//#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
+#define CLK_UPDATE_THRESHOLD2 48    // 2nd algorithm
 
-// master clock update period and amount to change.  Update based upon WWVB sync on falling edge routine.
-// values of 10 and 16 will change the clock about 1hz per hour.
-// values of 10 and 1 will change about 1hz per 16 hours. 
-//#define CLK_UPDATE_MIN 10
-//#define CLK_UPDATE_AMT  10          // amount in factional hz, 1/100 hz
-#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
-#define CLK_UPDATE_THRESHOLD2 46    // 2nd algorithm
-// #define SUB_ERROR 0                 // maybe account for time error of weak wwvb signal when defined as 1
-#define DEADBAND 10                 // signal deadband 
+#define DEADBAND 30                 // wwvb signal +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -1024,8 +1018,7 @@ uint8_t b,s,e;
 static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
 const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
 static uint8_t secs,errors,early,late;
-static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
-static int late_count,late_time, late_late;   // best late count for 30 minutes, 
+static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good 
 
    loops = t - old_t;
    old_t = t;
@@ -1090,24 +1083,8 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
         if( ++secs >= 64 || tick ){  //  adjust dither each minute
 
            tick = 0;
-           if( errors >= CLK_UPDATE_THRESHOLD2 ){
-              if( late >= late_late ){
-                   late_late = late;
-                   late_time = frame_msec;
-              }
-           }
-           else{
-               late_late = 0;
-               late_count = 0;
-           }
-
            val_print = ' ';
-           if( ++late_count > 60 ){
-               frame_sync2( CLK_UPDATE_THRESHOLD2 - 1, late_time );   // fake good sync up
-               if( wwvb_quiet == 1 ){ Serial.print(late_time); Serial.write(' '); }
-               late_late = 0, late_count = 0;
-           }
-           else frame_sync2( errors,frame_msec );
+           frame_sync2( errors,frame_msec );
            
            // running in print,       wwvb decode,   keep_time order    or
            //         in wwvb decode, print,         keep_time order    this case needs a time update
@@ -1117,13 +1094,13 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
            if( wwvb_quiet == 1 ){
                print_date_time();       
                Serial.write(' '); 
-               if( frame_msec < 100 ) Serial.write('0');
-               if( frame_msec < 10 ) Serial.write('0');
+               if( frame_msec < 100 ) Serial.write(' ');
+               if( frame_msec < 10 ) Serial.write(' ');
                Serial.print(frame_msec);
                Serial.print("  Err "); Serial.print(errors); Serial.write(val_print);
                Serial.print("  Clk ");  Serial.print(early);
                Serial.write(',');   Serial.print(late);
-               print_stats(1);
+               print_stats(1,errors);
                Serial.print("  FF "); Serial.print(FF);  
                Serial.write(' ');  Serial.print(ff);
                Serial.print("  Drift ");   Serial.print((int)drift/100);
@@ -1131,7 +1108,7 @@ static int late_count,late_time, late_late;   // best late count for 30 minutes,
                Serial.print("  Cal "); Serial.print(cal_result);
                Serial.println();
            }
-           else print_stats(0);
+           else print_stats(0,errors);
 
            time_flags = 0;
            
@@ -1177,25 +1154,29 @@ uint8_t i;
 }
 
 
-void print_stats(uint8_t prnt){
+void print_stats(uint8_t prnt, int tot){
 uint8_t i;
 
    if( prnt ){                // ones and zeros distribution
       Serial.print("  ");     // when in sync with WWVB, will see a display such as 11XXxx00
-      for( i = 7;  i < 8; --i ){
-         if( wwvb_stats[i] > 50 ) Serial.write('1');
-         else if( wwvb_stats[i] < 10 ) Serial.write('0');
-         else if( wwvb_stats[i] > 30 ) Serial.write('X');
-         else Serial.write('x');
-      //   wwvb_stats[i] = 0;
-      }
 
-     // Serial.write(' ');           // print binary with leading zero's, example failing data
-     // for( i = 7; i < 8; --i ){
-     //    if( wwvb_last_err & 0x80 ) Serial.write('1');
-     //    else Serial.write('0');
-     //    wwvb_last_err <<= 1;
-     // }
+      if( tot != 1 ){
+         for( i = 7;  i < 8; --i ){
+            if( wwvb_stats[i] > 50 ) Serial.write('1');
+            else if( wwvb_stats[i] < 10 ) Serial.write('0');
+            else if( wwvb_stats[i] > 30 ) Serial.write('X');
+            else Serial.write('x');
+         }
+      }
+      else{
+
+     // print the one error in binary, example failing data
+         for( i = 7; i < 8; --i ){
+            if( wwvb_last_err & 0x80 ) Serial.write('1');
+            else Serial.write('0');
+            wwvb_last_err <<= 1;
+         }
+      }
    }
  
    for( i = 0; i < 8; ++i ) wwvb_stats[i] = 0;
@@ -1206,55 +1187,41 @@ uint8_t i;
 // wwvb signal.
 void frame_sync2(int err, long tm){
 int8_t t,i;
-static int last_time_error;
-static int last_error_count = 47;  
+static int summer; 
 int loops;
 int cnt;
-// static uint64_t wwvb_data, wwvb_sync, wwvb_errors;  // defeat this algorithm by not using the globals
 
-  // tm = tm - SUB_ERROR * ( err >> 1 );
-  // if( tm < 0 ) tm += 1000;
-   if( tm > 1000 - DEADBAND || tm < DEADBAND ) tm = 0; // deadband for clock corrections
-  
-   loops = last_time_error/100;      // loop 1,2,3,4,5 times for error <100, <200, <300, <400, <500 
-   if( loops < 0 ) loops = -loops;
-   ++loops;
-   if( err < CLK_UPDATE_THRESHOLD2 ) ++loops;        // to process both the single and multi time adjustments
-
-   if( last_error_count < CLK_UPDATE_THRESHOLD2 )  ++last_error_count;   // relax the test threshold
-   
-   
-   for( i = 0; i < loops; ++i ){                     // run mult times for faster correction convergence
-    
-       t = 0;                                        // signal better than the relaxing threshold ?
-
-       if( err < last_error_count ){                 // looped time adjustment
-           t = ( tm < 500 ) ? -1 : 1 ;  
-           if( tm == 0 ) t = 0;
-           
-           cnt = CLK_UPDATE_THRESHOLD2 - err + 1; 
-           last_time_error = ( tm < 500 ) ? tm : tm - 1000 ;
-           last_time_error = constrain(last_time_error,-10*cnt,10*cnt);
-           // last_time_error += t;
-           last_error_count = err;       // new threshold
-           val_print = '*';
-       }
-       else if( err < CLK_UPDATE_THRESHOLD2 ){       // single time adjustment when locked out by last_error_count
-           t = ( tm < 500 ) ? -1 : 1 ;  
-           if( tm == 0 ) t = 0;
-           if( t == 1 ) val_print = '>';
-           if( t == -1 ) val_print = '<';  
-       }
-
-       if( t == 0 ){       // use old data for the correction amount
-          if( last_time_error > 0 ) last_time_error--, t = -1;
-          if( last_time_error < 0 ) last_time_error++, t = 1;
-       }
-       tm_correction2 += t;
-       clock_correction( t );  // long term clock drift correction
-  
-       err = 60;    // use last_time info for the 2nd pass in the loop
+   if( err >= CLK_UPDATE_THRESHOLD2 ){
+   // val_print = '>';
+    return;
    }
+   if( tm > 1000 - DEADBAND || tm < DEADBAND ) tm = 0;
+   if( tm == 0 ){
+      val_print = '_';
+    return;
+   }
+             
+   tm = ( tm < 500 ) ? tm : tm - 1000 ;
+   cnt = CLK_UPDATE_THRESHOLD2 - err;
+   if( tm > 0 ) summer -= cnt;
+   else summer += cnt;
+
+   loops = abs( summer );               // loops based upon signal quality, less errors more loops
+   loops >>= 3;                         // divide by 8 matches sub 8 below
+
+   t = 0;  
+   for( i = 0; i < loops; ++i ){        // run mult times for faster convergence
+
+       if( summer > 0 ) summer -= 8, t = 1;
+       if( summer < 0 ) summer += 8, t = -1;
+
+       tm_correction2 += t;
+       clock_correction( t );           // long term clock drift correction
+
+   }
+
+   if( t == 1 ) val_print = '>';
+   if( t == -1) val_print = '<';
   
 }
 
