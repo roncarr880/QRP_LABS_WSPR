@@ -42,7 +42,7 @@
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 48    // 2nd algorithm
 
-#define DEADBAND 30                 // wwvb signal +-deadband 
+#define DEADBAND 15                 // min value of wwvb signal +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -143,7 +143,7 @@ uint16_t leap = 1;
 #define TK 4        // keep time has been run
 #define TS 2        // time was set from WWVB decode
 #define TP 1        // print decode indicator
-uint8_t time_flags; // WWVB decodes the previous minute, flags to print the correct time
+uint8_t time_flags; // WWVB encodes the previous minute, flags to print the correct time
 
 /***************************************************************************/
 
@@ -1049,7 +1049,7 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
          }
          else{
             ++early;                   // need to sample later
-            wwvb_clk += dither;        // longer clock ( more of these as arduino runs fast )
+            wwvb_clk += dither;        // longer clock
          }
       }
       
@@ -1160,7 +1160,7 @@ uint8_t i;
    if( prnt ){                // ones and zeros distribution
       Serial.print("  ");     // when in sync with WWVB, will see a display such as 11XXxx00
 
-      if( tot != 1 ){
+      if( tot > 3 || tot == 0 ){
          for( i = 7;  i < 8; --i ){
             if( wwvb_stats[i] > 50 ) Serial.write('1');
             else if( wwvb_stats[i] < 10 ) Serial.write('0');
@@ -1170,7 +1170,7 @@ uint8_t i;
       }
       else{
 
-     // print the one error in binary, example failing data
+     // print an error in binary, example failing data
          for( i = 7; i < 8; --i ){
             if( wwvb_last_err & 0x80 ) Serial.write('1');
             else Serial.write('0');
@@ -1190,14 +1190,17 @@ int8_t t,i;
 static int summer; 
 int loops;
 int cnt;
+int dead;
+
+   dead = DEADBAND + 2*err;                 // smaller deadband when less errors
 
    if( err >= CLK_UPDATE_THRESHOLD2 ){
-   // val_print = '>';
+      val_print = '^';
     return;
    }
-   if( tm > 1000 - DEADBAND || tm < DEADBAND ) tm = 0;
+   if( tm > 1000 - dead || tm < dead ) tm = 0;
    if( tm == 0 ){
-      val_print = '_';
+      // val_print = '_';
     return;
    }
              
@@ -1205,6 +1208,9 @@ int cnt;
    cnt = CLK_UPDATE_THRESHOLD2 - err;
    if( tm > 0 ) summer -= cnt;
    else summer += cnt;
+
+   tm = abs(tm);                        // double the correction if drifting too far away from zero time
+   if( tm > CLK_UPDATE_THRESHOLD2 + 100 ) summer = summer << 1;
 
    loops = abs( summer );               // loops based upon signal quality, less errors more loops
    loops >>= 3;                         // divide by 8 matches sub 8 below
@@ -1220,8 +1226,8 @@ int cnt;
 
    }
 
-   if( t == 1 ) val_print = '>';
-   if( t == -1) val_print = '<';
+   if( t == 1 ) val_print = '+';
+   if( t == -1) val_print = '-';
   
 }
 
