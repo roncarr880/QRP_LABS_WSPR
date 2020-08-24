@@ -1192,7 +1192,7 @@ int loops;
 int cnt;
 int dead;
 
-   dead = DEADBAND + 2*err;                 // smaller deadband when less errors
+   dead = DEADBAND + err;                 // smaller deadband when less errors
 
    if( err >= CLK_UPDATE_THRESHOLD2 ){
       val_print = '^';
@@ -1203,7 +1203,8 @@ int dead;
       // val_print = '_';
     return;
    }
-             
+
+   val_print = '~';
    tm = ( tm < 500 ) ? tm : tm - 1000 ;
    cnt = CLK_UPDATE_THRESHOLD2 - err;
    if( tm > 0 ) summer -= cnt;
