@@ -40,9 +40,9 @@
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
-#define CLK_UPDATE_THRESHOLD2 48    // 2nd algorithm
+#define CLK_UPDATE_THRESHOLD2 46      // original algorithm
 
-#define DEADBAND 15                 // min value of wwvb signal +-deadband 
+#define DEADBAND 10                 // wwvb signal +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -1186,41 +1186,30 @@ uint8_t i;
 // adjust frame timing based upon undecoded wwvb statistics, locks to the falling edge of the 
 // wwvb signal.
 void frame_sync2(int err, long tm){
-int8_t t,i;
-static int summer; 
+int8_t t,i; 
 int loops;
 int cnt;
-int dead;
-
-   dead = DEADBAND + err;                 // smaller deadband when less errors
 
    if( err >= CLK_UPDATE_THRESHOLD2 ){
       val_print = '^';
     return;
    }
-   if( tm > 1000 - dead || tm < dead ) tm = 0;
-   if( tm == 0 ){
-      // val_print = '_';
-    return;
-   }
 
-   val_print = '~';
    tm = ( tm < 500 ) ? tm : tm - 1000 ;
    cnt = CLK_UPDATE_THRESHOLD2 - err;
-   if( tm > 0 ) summer -= cnt;
-   else summer += cnt;
-
-   tm = abs(tm);                        // double the correction if drifting too far away from zero time
-   if( tm > CLK_UPDATE_THRESHOLD2 + 100 ) summer = summer << 1;
-
-   loops = abs( summer );               // loops based upon signal quality, less errors more loops
-   loops >>= 3;                         // divide by 8 matches sub 8 below
-
+   tm = last_time_average( tm, cnt );
+   if( tm >= 0 && tm < DEADBAND ) return;
+   if( tm < 0  && tm > -DEADBAND) return;
+   
+   loops = tm/100;
+   if( loops < 0 ) loops = -loops;
+   ++loops;
+   
    t = 0;  
    for( i = 0; i < loops; ++i ){        // run mult times for faster convergence
 
-       if( summer > 0 ) summer -= 8, t = 1;
-       if( summer < 0 ) summer += 8, t = -1;
+       if( tm > 0 ) t = -1;
+       if( tm < 0 ) t = 1;
 
        tm_correction2 += t;
        clock_correction( t );           // long term clock drift correction
@@ -1230,6 +1219,27 @@ int dead;
    if( t == 1 ) val_print = '+';
    if( t == -1) val_print = '-';
   
+}
+
+
+long last_time_average( long val, int count ){    // average values
+
+static long run_ave;     // weighted running average
+int wt;
+long rval;
+
+   val <<= 8;            // scale up to keep a fractional part
+   
+   wt = ( count > 64 ) ? 64 : count;
+   run_ave = ( 64 - wt ) * run_ave + wt * val;
+   run_ave >>= 6;
+
+   rval = run_ave >> 8;
+   if( rval > DEADBAND ) run_ave -= 256;            // sub one ms when frame timing will be changed
+   if( rval < -DEADBAND ) run_ave += 256;
+   // Serial.print(rval); Serial.write(' ');
+   return rval;
+
 }
 
 /*************************** some old code with interesting algorithms ****************************
@@ -1429,21 +1439,6 @@ int temp;
 }
 
 
-int last_time_average( int val, int count ){    // average 8 values
-
-static int run_ave;     // weighted running average
-int wt;
-
-   if( run_ave > 0 ) --run_ave;        // leak toward zero
-   if( run_ave < 0 ) ++run_ave;
-   
-   wt = ( count > 8 ) ? 8 : count;
-   run_ave = ( 8 - wt ) * run_ave + wt * val;
-   run_ave >>= 3;
-   
-   return run_ave;
-
-}
 
 void clock_correction( int8_t val ){    // long term frequency correction to time fudge factor FF
 static int8_t time_trend;               // a change of +-100 is 1hz change
