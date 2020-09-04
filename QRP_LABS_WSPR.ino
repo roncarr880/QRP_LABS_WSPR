@@ -485,36 +485,43 @@ uint64_t local_drift;       // corrects for drift due to day/night temperature c
 char wwvb_trends( char val, uint8_t data ){
 static int i;     
 uint8_t count;
-uint8_t type1,type2;                 // 64 == sync, 32 == 1, 0 == 0
-#define HANG 11                      // trend time needed and bit timeout on errors
+uint8_t trend_t,new_t;
+#define HANG 11                      // trend time needed and bit timeout on errors ( max 15 )
+#define SYNC 64
+#define ONES 32
+#define ZEROS 0
 
     if( ++i >= 60 ) i = 0;
     if( data == 0 ) return val;      // probably transmitting
    
     count = trends[i] & 31;
-    type1 = trends[i] & (32 | 64 );
-    type2 = 128;                     // assume error
-    if( val == 'S' ) type2 = 64;
-    if( val == '1' ) type2 = 32;
-    if( val == '0' ) type2 = 0;
+    trend_t = trends[i] & (ONES | SYNC );
+    new_t = 128;                     // assume error
+    if( val == 'S' ) new_t = SYNC;
+    if( val == '1' ) new_t = ONES;
+    if( val == '0' ) new_t = ZEROS;
 
-    if( type1 == type2 ){          // increment the trend if match
+    if( trend_t == new_t ){          // increment the trend if match
         if( count < 2*HANG ) count += 1;
     }
-    else if( type2 == 128 ){       // decrement the trend on error
-        if( count ) --count;       // will fall below trend threshold in HANG time
+    else if( new_t == 128 && trend_t != SYNC ){       // decrement the trend on error, but sticky sync type
+        if( count ) --count;                          // will fall below trend threshold in HANG time
     }
-    if( type1 != type2 && type2 != 128 ){
-      count = 1;                  // initial count when the bit decoded but different than before
-      type1 = type2;              // new type
+    if( trend_t != new_t && new_t != 128 ){           // valid decode, bit changed,  replace type
+      if( trend_t == SYNC && count > 1 ) --count;     // don't directly replace a sync, decay it instead
+      else{
+         count = 1;                  // initial count when the bit decoded but different than before
+         trend_t = new_t;            // new type
+      }
     } 
-    trends[i] = type1 + count;      // save new trend values
+    
+    trends[i] = trend_t + count;       // save new trend values
 
-    if( type2 != 128 ) return val;     // return successful decode
+    if( new_t != 128 ) return val;     // return successful decode
     if( count > HANG ){                // else return history for this bit
-       if( type1 == 0  ) val = 'o';
-       if( type1 == 32 ) val = 'i';
-       if( type1 == 64 ) val = 's';
+       if( trend_t == 0  ) val = 'o';
+       if( trend_t == 32 ) val = 'i';
+       if( trend_t == 64 ) val = 's';
     }
 
     return val;
