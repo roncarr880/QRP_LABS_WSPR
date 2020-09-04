@@ -42,7 +42,7 @@
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 46      // original algorithm
 
-#define DEADBAND 10                 // wwvb signal +-deadband 
+#define DEADBAND 25                 // wwvb signal timing +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -144,6 +144,8 @@ uint16_t leap = 1;
 #define TS 2        // time was set from WWVB decode
 #define TP 1        // print decode indicator
 uint8_t time_flags; // WWVB encodes the previous minute, flags to print the correct time
+
+uint8_t trends[60]; // wwvb decode history
 
 /***************************************************************************/
 
@@ -478,6 +480,47 @@ uint64_t local_drift;       // corrects for drift due to day/night temperature c
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // new receiver 4x clock, transmitter 1x clock
     }
 }
+
+
+char wwvb_trends( char val, uint8_t data ){
+static int i;     
+uint8_t count;
+uint8_t type1,type2;                 // 64 == sync, 32 == 1, 0 == 0
+#define HANG 11                      // trend time needed and bit timeout on errors
+
+    if( ++i >= 60 ) i = 0;
+    if( data == 0 ) return val;      // probably transmitting
+   
+    count = trends[i] & 31;
+    type1 = trends[i] & (32 | 64 );
+    type2 = 128;                     // assume error
+    if( val == 'S' ) type2 = 64;
+    if( val == '1' ) type2 = 32;
+    if( val == '0' ) type2 = 0;
+
+    if( type1 == type2 ){          // increment the trend if match
+        if( count < 2*HANG ) count += 1;
+    }
+    else if( type2 == 128 ){       // decrement the trend on error
+        if( count ) --count;       // will fall below trend threshold in HANG time
+    }
+    if( type1 != type2 && type2 != 128 ){
+      count = 1;                  // initial count when the bit decoded but different than before
+      type1 = type2;              // new type
+    } 
+    trends[i] = type1 + count;      // save new trend values
+
+    if( type2 != 128 ) return val;     // return successful decode
+    if( count > HANG ){                // else return history for this bit
+       if( type1 == 0  ) val = 'o';
+       if( type1 == 32 ) val = 'i';
+       if( type1 == 64 ) val = 's';
+    }
+
+    return val;
+  
+}
+
 
 void frame_timer( unsigned long t ){   
 static unsigned long old_t;
@@ -1018,7 +1061,8 @@ uint8_t b,s,e;
 static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
 const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
 static uint8_t secs,errors,early,late;
-static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good 
+static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
+char ch;
 
    loops = t - old_t;
    old_t = t;
@@ -1062,12 +1106,31 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
         if( wwvb_tmp == 0xf0 || wwvb_tmp == 0xf1 ) e = 0, b = 1;
         if( wwvb_tmp == 0xc0 || wwvb_tmp == 0xc1 ) e = 0, s = 1;
 
+        gather_stats( wwvb_tmp , e );         // for serial logging display
+
+        if( e ) ch = '.';
+        else if( s ) ch = 'S';
+        else if( b == 0 ) ch = '0';
+        else if( b == 1 ) ch = '1';
+        ch = wwvb_trends(ch, wwvb_tmp);
+
+      // decode from trends
+        if( e ){
+           if( ch == 'o' ) b = 0, e = 0;
+           if( ch == 'i' ) b = 1, e = 0;
+           if( ch == 's' ) s = 1, e = 0;
+           ++errors;                         // for frame sync algorithms
+        }
+
+       
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
         wwvb_errors <<= 1; wwvb_errors |= e;  // errors
-        if( e ) ++errors;
-        gather_stats( wwvb_tmp , e );         // for serial logging display
-        
+
+        if( wwvb_quiet == 1 ){  
+            Serial.write(ch);
+            if( secs < 50 && secs%10 == 9 ) Serial.write(' ');
+        }
         // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
         // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
         // wwvb_sync &= 0x0fffffffffffffff;   // mask off the old bits from previous minute
@@ -1081,7 +1144,6 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
         }
 
         if( ++secs >= 64 || tick ){  //  adjust dither each minute
-
            tick = 0;
            val_print = ' ';
            frame_sync2( errors,frame_msec );
@@ -1092,6 +1154,7 @@ static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal 
     
                  // debug print out some stats when in test mode                
            if( wwvb_quiet == 1 ){
+               Serial.write(' ');
                print_date_time();       
                Serial.write(' '); 
                if( frame_msec < 100 ) Serial.write(' ');
