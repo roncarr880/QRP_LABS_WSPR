@@ -40,7 +40,7 @@
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
-#define CLK_UPDATE_THRESHOLD2 46
+#define CLK_UPDATE_THRESHOLD2 50
 
 #define DEADBAND 25                 // wwvb signal timing +-deadband 
 
@@ -491,13 +491,15 @@ static unsigned int syn_timer;
 static int mod10;
 static int q;
 static int force;
+static int fix;
+static int syncs[4];
 int w;
 
-   if( ++syn_timer > 180 ) force = 0;    // not receiving syncs often enough
    
    // double sync reset
     if( last_val == 'S' && val == 'S' && i != 59 ){
-       i = 59;   // force reset next lines of code
+       i = 59;                           // index reset next lines of code
+       force = 0;
     }
     last_val = val;
     
@@ -506,33 +508,56 @@ int w;
        z = 0;
     }
 
-    if( val == 'S' && i > 1 && i <= 50 ){      // look at syncs, double sync ignored
+    if( val == 'S' && i > 1 && i <= 50 ){      // syncs should all be modulo 9, double sync ignored,
+       syncs[0] = syncs[1]; syncs[1] = syncs[2]; syncs[2] = syncs[3]; syncs[3] = i;   // for reporting only
        w = i%10;
        if( w == mod10 ) ++q;
-       else q = 0;
+       else q = 0, force = 0;
        mod10 = w;
        
-       if( q >= 4 ){                           // quorum of syncs on same modulus index
+       if( q >= 3 ){                           // quorum of syncs on same modulus index
           if( mod10 == 9 ) force = 1;          // correct index
           else if( mod10 == 0 ) --i;           // started on wrong second
           else ++i;                            // slipped in time
           q = 0;       
        }
-       if( syn_timer > 180 ) force = 0;        // want rate one sync per 3 minutes minimum
-       syn_timer = 0;
     }
 
-    if( wwvb_quiet == 1 && i == 59 ){   // report syncs value and found
-       Serial.print("Force "); Serial.print(force);
-       Serial.print(" Syncs "); Serial.print( mod10 ); Serial.write('q');
-       Serial.print(q);  Serial.write(' '); 
+    if( val == 'S' ) syn_timer = 0;
+    if( ++syn_timer > 92 ) force = 0;       // not receiving syncs often enough, want > 1.5 per frame
+                                             
+    if( wwvb_quiet == 1 && i == 59 ){               // report syncs
+       Serial.print("F "); Serial.print(force);
+       Serial.print(" Fix ");
+       if( fix < 10 ) Serial.write(' '); 
+       Serial.print(fix);
+       Serial.print(" Sync ");
+       for( w = 0; w < 4; ++w ){
+           if( syncs[w] < 10 ) Serial.write(' ');
+           Serial.print(syncs[w]);  Serial.write(' ');
+       }
+       fix = 0; 
     }
-    
+
+    w = val;
     if( i == zeros[z] ){
         ++z;
-        if( force ) val = 'o';
+        if( force && val != '0' ) val = 'o';
     }
-    if( force && ( i == 0 || i%10 == 9 ) ) val = 's';
+    if( force && ( i == 0 || i%10 == 9 ) && val != 'S' ) val = 's';
+    if( w != val ) ++fix;
+
+    /*
+    // partial decodes for fun fails
+    static int min_e, hr_e;
+    if( i >= 1 && i <= 8  && val == '.' ) ++min_e;
+    if( i >= 12 && i <= 18 && val == '.' ) ++hr_e;
+    if( i == 0 ){
+        if( min_e == 0 )  gmin = wwvb_decode2( 8, 0xff );
+        if( hr_e == 0 )   ghr = wwvb_decode2( 18, 0x3f );
+        min_e = hr_e = 0;
+    }
+    */
     
     return val;
 }
@@ -1118,9 +1143,9 @@ char ch;
         b = 0;  s = 0;  e = 1;   // assume it is an error
         
         // strict decode works well, added some loose decode for common bit errors
-        if( wwvb_tmp == 0xfc || wwvb_tmp == 0xfd || wwvb_tmp == 0xfe ) e = 0, b = 0;
-        if( wwvb_tmp == 0xf0 || wwvb_tmp == 0xf1 ) e = 0, b = 1;
-        if( wwvb_tmp == 0xc0 || wwvb_tmp == 0xc1 ) e = 0, s = 1;
+        if( wwvb_tmp == 0xfc /*|| wwvb_tmp == 0xfd || wwvb_tmp == 0xfe*/ ) e = 0, b = 0;
+        if( wwvb_tmp == 0xf0 /*|| wwvb_tmp == 0xf1*/ ) e = 0, b = 1;
+        if( wwvb_tmp == 0xc0 /*|| wwvb_tmp == 0xc1*/ ) e = 0, s = 1;
 
         gather_stats( wwvb_tmp , e );         // for serial logging display
 
@@ -1134,9 +1159,9 @@ char ch;
         if( e ){
            if( ch == 'o' ) b = 0, e = 0;
            if( ch == 's' ) s = 1, e = 0;
-           ++errors;                         // for frame sync algorithms
+          // ++errors;                         // here for frame sync algorithms
         }
-
+        if( e ) ++errors;                      // or here to see result of force syncs and zeros
        
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
