@@ -487,77 +487,74 @@ char wwvb_trends( char val ){
 const int zeros[17] = {4,10,11,14,20,21,24,34,35,36,37,38,44,54,56,57,58};
 static int i,z;
 static char last_val;
-static unsigned int syn_timer;
 static int mod10;
 static int q;
 static int force;
 static int fix;
 static int syncs[4];
+static int disable;
 int w;
 
    
    // double sync reset
-    if( last_val == 'S' && val == 'S' && i != 59 ){
-       i = 59;                           // index reset next lines of code
-       force = 0;
+    if( last_val == 'S' && val == 'S' ){
+       if( i != 59 ){
+          i = 59;                           // index reset next lines of code
+          force = 0;
+       }
+       disable = 0;
     }
     last_val = val;
     
-    if( ++i >= 60 ){
+    if( ++i >= 60 ){                     // start of next minute
        i = 0;
        z = 0;
+       fix = 0;
+       if( frame_sec == 4 ) ++i;                //  slipping in time.  Happens on very weak wwvb signal
+                                                //  this test is 1 sec after the print at second 59
+       if( frame_sec > 4 && frame_sec < 56 ) disable = 1;   // out of correction range, wait for double sync
     }
 
-    if( val == 'S' && i > 1 && i <= 50 ){      // syncs should all be modulo 9, double sync ignored,
+    if( val == 'S' && i > 4 && i < 56 ){      // syncs should all be modulo 9, double sync ignored,
        syncs[0] = syncs[1]; syncs[1] = syncs[2]; syncs[2] = syncs[3]; syncs[3] = i;   // for reporting only
        w = i%10;
        if( w == mod10 ) ++q;
        else q = 0, force = 0;
        mod10 = w;
        
-       if( q >= 3 ){                           // quorum of syncs on same modulus index
+       if( q >= 3 && disable == 0 ){           // quorum of syncs on same modulus index
           if( mod10 == 9 ) force = 1;          // correct index
-          else if( mod10 == 0 ) --i;           // started on wrong second
-          else ++i;                            // slipped in time
+          else if( mod10 >= 4 ) ++i;           // slipped in time
+          else --i;                            // started early or some other issue like a time reset
           q = 0;       
        }
     }
-
-    if( val == 'S' ) syn_timer = 0;
-    if( ++syn_timer > 92 ) force = 0;       // not receiving syncs often enough, want > 1.5 per frame
                                              
+    w = val;
+    if( i == zeros[z] ){
+        ++z;
+        if( force && val == '.' ) val = 'o';  // remove errors on don't care bits
+    }
+    if( force && ( i == 0 || i%10 == 9 ) && val != 'S' ) val = 's';
+    if( w != val ) ++fix;
+
+    if( fix == 9 ) force = 0;                       // too many fails a minute
+
     if( wwvb_quiet == 1 && i == 59 ){               // report syncs
+       if( frame_sec < 100 ) Serial.write(' ');
+       if( frame_sec < 10  ) Serial.write(' ');
+       Serial.print(frame_sec); Serial.write(' ');
        Serial.print("F "); Serial.print(force);
        Serial.print(" Fix ");
-       if( fix < 10 ) Serial.write(' '); 
+       // if( fix < 10 ) Serial.write(' '); 
        Serial.print(fix);
        Serial.print(" Sync ");
        for( w = 0; w < 4; ++w ){
            if( syncs[w] < 10 ) Serial.write(' ');
            Serial.print(syncs[w]);  Serial.write(' ');
-       }
-       fix = 0; 
+       } 
     }
 
-    w = val;
-    if( i == zeros[z] ){
-        ++z;
-        if( force && val != '0' ) val = 'o';
-    }
-    if( force && ( i == 0 || i%10 == 9 ) && val != 'S' ) val = 's';
-    if( w != val ) ++fix;
-
-    /*
-    // partial decodes for fun fails
-    static int min_e, hr_e;
-    if( i >= 1 && i <= 8  && val == '.' ) ++min_e;
-    if( i >= 12 && i <= 18 && val == '.' ) ++hr_e;
-    if( i == 0 ){
-        if( min_e == 0 )  gmin = wwvb_decode2( 8, 0xff );
-        if( hr_e == 0 )   ghr = wwvb_decode2( 18, 0x3f );
-        min_e = hr_e = 0;
-    }
-    */
     
     return val;
 }
@@ -1091,7 +1088,7 @@ static uint8_t delay_counter;
 // when the sync variable contains the magic number, decode the 64 bit data.
 // each second starts with a low signal and ends with a high signal
 // much like software sampling rs232 start and stop bits.
-// this routine runs fast by design until it locks on the wwvb signal
+// this routine runs fast by design until it locks on the wwvb signal( or slow depending upon point of view )
 // if more than 30 seconds out of sync with the frame timer, then the time printed may be incorrect
 // but that may take days and the time is only printed in debug mode
 // this original version seems to work better in noise than the 2nd version
@@ -1104,6 +1101,7 @@ const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000
 static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch;
+uint8_t temp;
 
    loops = t - old_t;
    old_t = t;
@@ -1141,13 +1139,18 @@ char ch;
         // decode
         // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
         b = 0;  s = 0;  e = 1;   // assume it is an error
+
+        // force known bits
+        temp = wwvb_tmp;         // save actual bits received
+        wwvb_tmp |= 0x80;        // stop bit
+        wwvb_tmp &= 0xfe;        // start bit
         
         // strict decode works well, added some loose decode for common bit errors
         if( wwvb_tmp == 0xfc /*|| wwvb_tmp == 0xfd || wwvb_tmp == 0xfe*/ ) e = 0, b = 0;
         if( wwvb_tmp == 0xf0 /*|| wwvb_tmp == 0xf1*/ ) e = 0, b = 1;
         if( wwvb_tmp == 0xc0 /*|| wwvb_tmp == 0xc1*/ ) e = 0, s = 1;
 
-        gather_stats( wwvb_tmp , e );         // for serial logging display
+        gather_stats( temp , e );         // for serial logging display
 
         if( e ) ch = '.';
         else if( s ) ch = 'S';
@@ -1159,9 +1162,8 @@ char ch;
         if( e ){
            if( ch == 'o' ) b = 0, e = 0;
            if( ch == 's' ) s = 1, e = 0;
-          // ++errors;                         // here for frame sync algorithms
+           ++errors;                         // here for frame sync algorithms
         }
-        if( e ) ++errors;                      // or here to see result of force syncs and zeros
        
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
@@ -1261,9 +1263,9 @@ uint8_t i;
 
       if( tot > 3 || tot == 0 ){
          for( i = 7;  i < 8; --i ){
-            if( wwvb_stats[i] > 50 ) Serial.write('1');
-            else if( wwvb_stats[i] < 10 ) Serial.write('0');
-            else if( wwvb_stats[i] > 30 ) Serial.write('X');
+            if( wwvb_stats[i] > 55 ) Serial.write('1');
+            else if( wwvb_stats[i] < 5 ) Serial.write('0');
+            else if( wwvb_stats[i] > 40 ) Serial.write('X');
             else Serial.write('x');
          }
       }
@@ -1559,5 +1561,127 @@ uint8_t changed;                        // correct for seasonal temperature vari
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
     }
 }
+
+// correct errors on bits that do not change often
+// this version moves the counters up to a hard limit and moves down on different bit decoded
+// slips in time on weak signal as is called from frame_sync
+char wwvb_trends( char val, uint8_t data ){
+static int i = 60;
+static int slip_arm = 720;        // start in hold off mode
+uint8_t count;
+uint8_t trend_t,new_t;
+int w;
+static int sync_count,sync_force;
+
+#define LIMIT 6         // max 30
+#define SYNC 32
+#define ONES 64
+#define ZEROS 128
+#define ERR  0
+
+    if( ++i >= 60 ){
+       i = 0;
+       sync_force = ( sync_count > 1 ) ? 1 : 0;
+       sync_count = 0;
+       if( gmin == 59 ){          // clear some hour data as it will now change
+          for( w = 15; w < 19; ++w ) trends[w] = 0;
+       }
+    }
+
+    // see if slipping in time when have a weak signal
+    if( slip_arm > 1 ){                // hold_off to avoid repeats
+       if( --slip_arm == 1 ) slip_arm = 0;
+    }
+    else{
+       w = frame_msec / 100;
+       if( w == 3 || w == 4 ) slip_arm = 1;
+       if( w == 0 || w == 9 ) slip_arm = 0;
+       if( slip_arm == 1 && ( w == 5 || w == 6 ) ){
+          if( ++i >= 60 ) i = 0;
+          slip_arm = 360;              // hold off for 6 minutes
+          for( w = 0; w < 60; ++w ) trends[w] = 0;
+       }
+    }
+   
+       count = trends[i] & 31;
+       trend_t = trends[i] & ( ONES | SYNC | ZEROS );
+       new_t = ERR;                     // assume error
+       if( val == 'S' ) new_t = SYNC;
+       if( val == '1' ) new_t = ONES;
+       if( val == '0' ) new_t = ZEROS;
+
+       // decode ambiguous bits 
+       if( new_t == ERR && count > LIMIT/2 ){
+           if( trend_t == ZEROS && ( data == 0x7c ) ) val = 'c', new_t = ZEROS;
+           if( trend_t == ONES && ( data == 0xf8 || data == 0x70) ) val = '!', new_t = ONES;
+           if( trend_t == SYNC && ( data == 0xe0 || data == 0x40) ) val = 'T', new_t = SYNC;
+       }
+       
+
+       if( trend_t == new_t && trend_t != ERR ){          // increment the trend if match
+           if( count < LIMIT ) ++count;
+       }
+    
+       if( trend_t != new_t && new_t != ERR ){                    // valid decode, bit changed,  age type
+         if( count > 1 ) count -=  ( trend_t == SYNC ? 1 : 2 );   // age existing type
+         else{
+            count = (new_t == SYNC) ? 2 : 1;          
+            trend_t = new_t;                             // new type
+         }
+       } 
+    
+       trends[i] = trend_t + count;       // save new trend values
+
+    // sync index to double sync
+       if( i > 0 && trend_t == SYNC && count > LIMIT/2 ){
+          if( (trends[i-1] & SYNC) == SYNC ){
+              for( i = 1; i < 59; ++i ) trends[i] = 0;   // clear data
+              trends[0] = trends[59] = LIMIT/2+SYNC;       // known syncs
+              i = 0;
+          }
+       }
+       // should we sync off by one, early syncs
+       if( i > 7 && i < 51 && trend_t == SYNC && count > LIMIT/2 ){
+           if( ( i % 10 ) == 8 ){
+               ++i;
+               trends[i-1] = 0;
+               trends[i] = SYNC + count;
+           }
+           if( ( i % 10 ) == 0 ){
+               --i;
+               trends[i+1] = 0;
+               trends[i] = SYNC + count;            
+           }
+        
+       }
+
+       // return history on errors
+       if( new_t == ERR && ( i > 8 || i == 0 || i == 4 )){ 
+          if( count == LIMIT ){
+             if( trend_t == ZEROS  ) val = 'o';
+             if( trend_t == ONES ) val = 'i';
+             if( trend_t == SYNC ) val = 's';
+          }
+       }
+       
+       if( i == 0 && val != 'S' && val != 's' ) val = 'x';   //  view index on no decode no history
+
+       // count syncs, force syncs
+       if( i == 0 || i%10 == 9 ){
+          if( trend_t == SYNC && count == LIMIT ) ++sync_count;
+          if( sync_force && val != 'S' && val != 's' ) val = 'X';
+       }
+    
+    
+    if( wwvb_quiet == 1 ){  
+       Serial.write(val);
+       if( i < 50 && i%10 == 9 ) Serial.write(' ');
+    }
+
+    return val;
+  
+}
+
+
 
 **************************************************************************************************/
