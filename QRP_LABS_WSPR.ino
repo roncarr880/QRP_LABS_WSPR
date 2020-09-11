@@ -493,7 +493,7 @@ uint8_t count;
 uint8_t trend_t,new_t;
 int w;
 
-#define LIMIT 8         // 2 min 30 max
+#define LIMIT 6         // 2 min 30 max
 #define SYNC 32
 #define ONES 64
 #define ZEROS 128
@@ -501,11 +501,11 @@ int w;
 
     if( ++i >= 60 ){
        i = 0;
-       if( gmin == 59 ){          // clear some hour data as it will now change
-          for( w = 15; w < 19; ++w ) trends[w] = 0;
-       }
-       if( frame_sec == 3 ) ++i;  //  slipping in time.  Happens on very weak wwvb signal
-    }
+   //    if( gmin == 59 ){          // clear some hour data as it will now change
+   //       for( w = 15; w < 19; ++w ) trends[w] = 0;
+   //    }
+       if( frame_sec < 59 && frame_sec > 1 ) ++i;  // slipping in time.  Happens on very weak wwvb signal
+    }                                              // frame sec counts to 120, so testing half the time
 
    
        count = trends[i] & 31;
@@ -529,32 +529,8 @@ int w;
     
        trends[i] = trend_t + count;       // save new trend values
 
-    // sync index to double sync
-       if( i > 0 && trend_t == SYNC && count > LIMIT/2 ){
-          if( (trends[i-1] & SYNC) == SYNC ){
-              for( i = 1; i < 59; ++i ) trends[i] = 0;   // clear data
-              trends[0] = trends[59] = LIMIT/2+SYNC;       // known syncs
-              i = 0;
-          }
-       }
-       
-       // sync if slipped in time.  Keep minute data in correct buckets.
-       if( i > 5 && i < 51 && trend_t == SYNC && count > LIMIT/2 ){
-           if( ( i % 10 ) == 8 || i % 10 == 7 || i % 10 == 6 ){
-               ++i;
-               trends[i-1] = 0;
-               trends[i] = SYNC + count;
-           }
-           if( ( i % 10 ) == 0 ){            // started program early
-               --i;
-               trends[i+1] = 0;
-               trends[i] = SYNC + count;            
-           }
-        
-       }
-
-       // return history on errors, do not send trend for the minutes fields
-       if( new_t == ERR && ( i > 8 || i == 0 || i == 4 )){ 
+       // return history on errors, do not send trend for the minutes hours fields
+       if( new_t == ERR && ( i >= 19 || trend_t == SYNC ) ){ 
           if( count == LIMIT ){
              if( trend_t == ZEROS  ) val = 'o';
              if( trend_t == ONES ) val = 'i';
@@ -563,7 +539,7 @@ int w;
        }
 
       
-       if( i == 0 && val != 'S' && val != 's' ) val = 'x';   //  view index on no decode no history    
+       if( i == 0 && new_t == ERR ) val = 'x';   //  view index on no decode no history    
     
     if( wwvb_quiet == 1 ){  
        Serial.write(val);
@@ -1235,9 +1211,9 @@ char ch;
         b = 0;  s = 0;  e = 1;   // assume it is an error
         
         // strict decode works well, added some loose decode for common bit errors
-        if( wwvb_tmp == 0xfc /*|| wwvb_tmp == 0xfd || wwvb_tmp == 0xfe*/ ) e = 0, b = 0;
-        if( wwvb_tmp == 0xf0 /*|| wwvb_tmp == 0xf1*/ ) e = 0, b = 1;
-        if( wwvb_tmp == 0xc0 /*|| wwvb_tmp == 0xc1*/ ) e = 0, s = 1;
+        if( wwvb_tmp == 0xfc || wwvb_tmp == 0xfd || wwvb_tmp == 0xfe ) e = 0, b = 0;
+        if( wwvb_tmp == 0xf0 || wwvb_tmp == 0xf1 ) e = 0, b = 1;
+        if( wwvb_tmp == 0xc0 || wwvb_tmp == 0xc1 ) e = 0, s = 1;
 
         gather_stats( wwvb_tmp , e );         // for serial logging display
 
