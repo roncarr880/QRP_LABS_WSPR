@@ -146,6 +146,8 @@ uint16_t leap = 1;
 #define TP 1        // print decode indicator
 uint8_t time_flags; // WWVB encodes the previous minute, flags to print the correct time
 
+uint8_t trends[60];
+
 /***************************************************************************/
 
 void ee_save(){ 
@@ -341,7 +343,7 @@ uint8_t i;
   ++decodes;
 
   yr = wwvb_decode2( 53, 0x1ff );   // year is 0 to 99
-  dy = wwvb_decode2( 33, 0xfff );   // day is 0 to 365
+  dy = wwvb_decode2( 33, 0xfff );   // day is 0 to 365/366
   hr = wwvb_decode2( 18, 0x3f );
   mn = wwvb_decode2( 8, 0xff );
   leap = wwvb_decode2( 55, 0x1 );
@@ -481,6 +483,99 @@ uint64_t local_drift;       // corrects for drift due to day/night temperature c
 }
 
 
+
+// correct errors on bits that do not change often
+// this version moves the counters up to a hard limit and moves down on different bit decoded
+// slips in time on weak signal as is called from frame_sync
+char wwvb_trends( char val ){
+static int i = 60;
+uint8_t count;
+uint8_t trend_t,new_t;
+int w;
+
+#define LIMIT 8         // 2 min 30 max
+#define SYNC 32
+#define ONES 64
+#define ZEROS 128
+#define ERR  0
+
+    if( ++i >= 60 ){
+       i = 0;
+       if( gmin == 59 ){          // clear some hour data as it will now change
+          for( w = 15; w < 19; ++w ) trends[w] = 0;
+       }
+       if( frame_sec == 3 ) ++i;  //  slipping in time.  Happens on very weak wwvb signal
+    }
+
+   
+       count = trends[i] & 31;
+       trend_t = trends[i] & ( ONES | SYNC | ZEROS );
+       new_t = ERR;                     // assume error
+       if( val == 'S' ) new_t = SYNC;
+       if( val == '1' ) new_t = ONES;
+       if( val == '0' ) new_t = ZEROS;       
+
+       if( trend_t == new_t && trend_t != ERR ){          // increment the trend if match
+           if( count < LIMIT ) ++count;
+       }
+    
+       if( trend_t != new_t && new_t != ERR ){                    // valid decode, bit changed,  age type
+         if( count > 1 ) count -=  ( trend_t == SYNC ? 1 : 2 );   // age existing type, favor sync
+         else{
+            count = 1;          
+            trend_t = new_t; 
+         }
+       } 
+    
+       trends[i] = trend_t + count;       // save new trend values
+
+    // sync index to double sync
+       if( i > 0 && trend_t == SYNC && count > LIMIT/2 ){
+          if( (trends[i-1] & SYNC) == SYNC ){
+              for( i = 1; i < 59; ++i ) trends[i] = 0;   // clear data
+              trends[0] = trends[59] = LIMIT/2+SYNC;       // known syncs
+              i = 0;
+          }
+       }
+       
+       // sync if slipped in time.  Keep minute data in correct buckets.
+       if( i > 5 && i < 51 && trend_t == SYNC && count > LIMIT/2 ){
+           if( ( i % 10 ) == 8 || i % 10 == 7 || i % 10 == 6 ){
+               ++i;
+               trends[i-1] = 0;
+               trends[i] = SYNC + count;
+           }
+           if( ( i % 10 ) == 0 ){            // started program early
+               --i;
+               trends[i+1] = 0;
+               trends[i] = SYNC + count;            
+           }
+        
+       }
+
+       // return history on errors, do not send trend for the minutes fields
+       if( new_t == ERR && ( i > 8 || i == 0 || i == 4 )){ 
+          if( count == LIMIT ){
+             if( trend_t == ZEROS  ) val = 'o';
+             if( trend_t == ONES ) val = 'i';
+             if( trend_t == SYNC ) val = 's';
+          }
+       }
+
+      
+       if( i == 0 && val != 'S' && val != 's' ) val = 'x';   //  view index on no decode no history    
+    
+    if( wwvb_quiet == 1 ){  
+       Serial.write(val);
+       if( i < 50 && i%10 == 9 ) Serial.write(' ');
+    }
+
+    return val;
+  
+}
+
+
+/*
 // remove any errors on don't care bits, force to zero
 // force syncs when we think we are in sync
 char wwvb_trends( char val ){
@@ -558,7 +653,7 @@ int w;
     
     return val;
 }
-
+*/
 
 void frame_timer( unsigned long t ){   
 static unsigned long old_t;
@@ -1101,7 +1196,6 @@ const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000
 static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch;
-uint8_t temp;
 
    loops = t - old_t;
    old_t = t;
@@ -1139,18 +1233,13 @@ uint8_t temp;
         // decode
         // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
         b = 0;  s = 0;  e = 1;   // assume it is an error
-
-        // force known bits
-        temp = wwvb_tmp;         // save actual bits received
-        wwvb_tmp |= 0x80;        // stop bit
-        wwvb_tmp &= 0xfe;        // start bit
         
         // strict decode works well, added some loose decode for common bit errors
         if( wwvb_tmp == 0xfc /*|| wwvb_tmp == 0xfd || wwvb_tmp == 0xfe*/ ) e = 0, b = 0;
         if( wwvb_tmp == 0xf0 /*|| wwvb_tmp == 0xf1*/ ) e = 0, b = 1;
         if( wwvb_tmp == 0xc0 /*|| wwvb_tmp == 0xc1*/ ) e = 0, s = 1;
 
-        gather_stats( temp , e );         // for serial logging display
+        gather_stats( wwvb_tmp , e );         // for serial logging display
 
         if( e ) ch = '.';
         else if( s ) ch = 'S';
@@ -1162,6 +1251,7 @@ uint8_t temp;
         if( e ){
            if( ch == 'o' ) b = 0, e = 0;
            if( ch == 's' ) s = 1, e = 0;
+           if( ch == 'i' ) b = 1, e = 0;
            ++errors;                         // here for frame sync algorithms
         }
        
@@ -1562,125 +1652,6 @@ uint8_t changed;                        // correct for seasonal temperature vari
     }
 }
 
-// correct errors on bits that do not change often
-// this version moves the counters up to a hard limit and moves down on different bit decoded
-// slips in time on weak signal as is called from frame_sync
-char wwvb_trends( char val, uint8_t data ){
-static int i = 60;
-static int slip_arm = 720;        // start in hold off mode
-uint8_t count;
-uint8_t trend_t,new_t;
-int w;
-static int sync_count,sync_force;
-
-#define LIMIT 6         // max 30
-#define SYNC 32
-#define ONES 64
-#define ZEROS 128
-#define ERR  0
-
-    if( ++i >= 60 ){
-       i = 0;
-       sync_force = ( sync_count > 1 ) ? 1 : 0;
-       sync_count = 0;
-       if( gmin == 59 ){          // clear some hour data as it will now change
-          for( w = 15; w < 19; ++w ) trends[w] = 0;
-       }
-    }
-
-    // see if slipping in time when have a weak signal
-    if( slip_arm > 1 ){                // hold_off to avoid repeats
-       if( --slip_arm == 1 ) slip_arm = 0;
-    }
-    else{
-       w = frame_msec / 100;
-       if( w == 3 || w == 4 ) slip_arm = 1;
-       if( w == 0 || w == 9 ) slip_arm = 0;
-       if( slip_arm == 1 && ( w == 5 || w == 6 ) ){
-          if( ++i >= 60 ) i = 0;
-          slip_arm = 360;              // hold off for 6 minutes
-          for( w = 0; w < 60; ++w ) trends[w] = 0;
-       }
-    }
-   
-       count = trends[i] & 31;
-       trend_t = trends[i] & ( ONES | SYNC | ZEROS );
-       new_t = ERR;                     // assume error
-       if( val == 'S' ) new_t = SYNC;
-       if( val == '1' ) new_t = ONES;
-       if( val == '0' ) new_t = ZEROS;
-
-       // decode ambiguous bits 
-       if( new_t == ERR && count > LIMIT/2 ){
-           if( trend_t == ZEROS && ( data == 0x7c ) ) val = 'c', new_t = ZEROS;
-           if( trend_t == ONES && ( data == 0xf8 || data == 0x70) ) val = '!', new_t = ONES;
-           if( trend_t == SYNC && ( data == 0xe0 || data == 0x40) ) val = 'T', new_t = SYNC;
-       }
-       
-
-       if( trend_t == new_t && trend_t != ERR ){          // increment the trend if match
-           if( count < LIMIT ) ++count;
-       }
-    
-       if( trend_t != new_t && new_t != ERR ){                    // valid decode, bit changed,  age type
-         if( count > 1 ) count -=  ( trend_t == SYNC ? 1 : 2 );   // age existing type
-         else{
-            count = (new_t == SYNC) ? 2 : 1;          
-            trend_t = new_t;                             // new type
-         }
-       } 
-    
-       trends[i] = trend_t + count;       // save new trend values
-
-    // sync index to double sync
-       if( i > 0 && trend_t == SYNC && count > LIMIT/2 ){
-          if( (trends[i-1] & SYNC) == SYNC ){
-              for( i = 1; i < 59; ++i ) trends[i] = 0;   // clear data
-              trends[0] = trends[59] = LIMIT/2+SYNC;       // known syncs
-              i = 0;
-          }
-       }
-       // should we sync off by one, early syncs
-       if( i > 7 && i < 51 && trend_t == SYNC && count > LIMIT/2 ){
-           if( ( i % 10 ) == 8 ){
-               ++i;
-               trends[i-1] = 0;
-               trends[i] = SYNC + count;
-           }
-           if( ( i % 10 ) == 0 ){
-               --i;
-               trends[i+1] = 0;
-               trends[i] = SYNC + count;            
-           }
-        
-       }
-
-       // return history on errors
-       if( new_t == ERR && ( i > 8 || i == 0 || i == 4 )){ 
-          if( count == LIMIT ){
-             if( trend_t == ZEROS  ) val = 'o';
-             if( trend_t == ONES ) val = 'i';
-             if( trend_t == SYNC ) val = 's';
-          }
-       }
-       
-       if( i == 0 && val != 'S' && val != 's' ) val = 'x';   //  view index on no decode no history
-
-       // count syncs, force syncs
-       if( i == 0 || i%10 == 9 ){
-          if( trend_t == SYNC && count == LIMIT ) ++sync_count;
-          if( sync_force && val != 'S' && val != 's' ) val = 'X';
-       }
-    
-    
-    if( wwvb_quiet == 1 ){  
-       Serial.write(val);
-       if( i < 50 && i%10 == 9 ) Serial.write(' ');
-    }
-
-    return val;
-  
-}
 
 
 
