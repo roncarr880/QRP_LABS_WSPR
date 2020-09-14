@@ -7,7 +7,6 @@
 //   Added a CANADAUINO  WWVB interface to keep time.
 
 //   The CAT emulation is TenTec Argonaut V at 1200 baud.
-//   Changed to 57600 as debug messages were too long for 1200 baud. ( bad decode after message print )
 
 //   To set a new operation frequency for stand alone Frame Mode, restart the Arduino, start wsjt-x or HRD.
 //   Tune to one of the magic WSPR frequencies and toggle TX (tune in wsjt will work).
@@ -185,7 +184,7 @@ void ee_restore(){
 void setup() {
 uint8_t i;
   
-  Serial.begin(57600);      // TenTec Argo V baud rate 1200
+  Serial.begin(1200);      // TenTec Argo V baud rate 1200
   i2init();
 
   ee_restore();            // get default freq for frame mode from eeprom
@@ -543,15 +542,15 @@ int w;
        trends[i] = trend_t + count;       // save new trend values
 
        // return history on errors with only 1 bit incorrect
-       if( new_t == ERR && count == LIMIT && i != 8 ){             // require no bit error for even odd minute
-          if( trend_t == ZEROS  ){
-              if( bit_errors(dat,0xfc) < 2 ) val = 'o';
+       if( new_t == ERR && count == LIMIT  ){
+          if( trend_t == ZEROS ){
+              if( bit_errors(dat,0xfc,i) < 2 ) val = 'o';
           }
           if( trend_t == ONES ){
-              if( bit_errors(dat,0xf0) < 2 ) val = 'i';
+              if( bit_errors(dat,0xf0,i) < 2 ) val = 'i';
           }
           if( trend_t == SYNC ){
-              if( bit_errors(dat,0xc0) < 2 ) val = 's';
+              if( bit_errors(dat,0xc0,i) < 2 ) val = 's';
           }          
        }
 
@@ -568,9 +567,20 @@ int w;
 }
 
 
-int bit_errors( uint8_t val, uint8_t mask ){
-int count, i;
+int bit_errors( uint8_t val, uint8_t mask, int i ){
+int count;
 uint8_t b;
+
+   // only here if the val did not decode as exact
+   // provide different levels of correction depending upon what field the val is in.
+   if( i < 9 && i != 4 && i != 0 ) return 8;        // require exact decode in the minutes field
+
+   // hours field changes once per hour, don't correct bit pattern 11111000 which has one bit error for
+   // both a 0 and a 1.
+   if( val == 0xf8 && i > 11 && i < 19 && i != 14 ) return 8;    // 10,11,14 are unused always zero
+
+   // the rest of the fields change once a year or are don't care bytes for this application.
+   // count how many bits are different from the mask.  Decode from trends if only one bit is incorrect.
 
    count = 0,  b = 0x80;
    val = val ^ mask;                // val = error bits
@@ -578,7 +588,11 @@ uint8_t b;
        if( val & b ) ++count;
        b >>= 1;  
    }
+
+   if( i >= 19 ) --count;     // allow two bit errors on the bytes that never change but once a year
+   
    return count;
+
 }
 
 /*
@@ -1302,6 +1316,8 @@ char ch;
       wwvb_tmp |= b;
       wwvb_sum = 0;
 
+      dbug_errors( 0, 0, 0, 0, 0 );
+
       // 8 dumps of the integrator is one second, decode this bit ?
       wwvb_count++;
       wwvb_count &= 7;
@@ -1344,8 +1360,9 @@ char ch;
            if( ch == 'o' ) b = 0, e = 0;
            if( ch == 's' ) s = 1, e = 0;
            if( ch == 'i' ) b = 1, e = 0;
+           ++errors;
         }
-        if( e ) ++errors;
+        // if( e ) ++errors;
         
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
@@ -1355,8 +1372,7 @@ char ch;
         // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
         // wwvb_sync &= 0x0fffffffffffffff;   // mask off the old bits from previous minute
         // instead of masking, use the old bits to see the double sync bits at 0 of this minute
-        // and 59 seconds of the previous minute.  This decodes at zero time rather than some
-        // algorithms that decode at 1 second past.
+        // and 59 seconds of the previous minute.  This decodes at zero time.
         if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
           if( wwvb_errors == 0 ){    // decode if no bit errors
              wwvb_decode();
@@ -1372,7 +1388,8 @@ char ch;
            //         in wwvb decode, print,         keep_time order    this case needs a time update
            if( time_flags & TS ) keep_time();  // need to increment the time since the last decode
     
-                 // debug print out some stats when in test mode                
+                 // debug print out some stats when in test mode
+                 // break this up for 1200 baud, takes too much time and causes missed decode after line feed                
            if( wwvb_quiet == 1 ){
                Serial.write(' ');
                print_date_time();       
@@ -1380,16 +1397,18 @@ char ch;
                if( frame_msec < 100 ) Serial.write(' ');
                if( frame_msec < 10 ) Serial.write(' ');
                Serial.print(frame_msec);
-               Serial.print("  Err "); Serial.print(errors); Serial.write(val_print);
-               Serial.print("  Clk ");  Serial.print(early);
-               Serial.write(',');   Serial.print(late);
-               print_stats(1,errors);
-               Serial.print("  FF "); Serial.print(FF);  
-               Serial.write(' ');  Serial.print(ff);
-               Serial.print("  Drift ");   Serial.print((int)drift/100);
-               Serial.print("  CC "); Serial.print(tm_correct_count);
-               Serial.print("  Cal "); Serial.print(cal_result);
-               Serial.println();
+               dbug_errors(1,errors,val_print,early,late);
+               
+             //  Serial.print("  Err "); Serial.print(errors); Serial.write(val_print);
+             //  Serial.print("  Clk ");  Serial.print(early);
+             //  Serial.write(',');   Serial.print(late);
+             //  print_stats(1,errors);
+             //  Serial.print("  FF "); Serial.print(FF);  
+             //  Serial.write(' ');  Serial.print(ff);
+             //  Serial.print("  Drift ");   Serial.print((int)drift/100);
+             //  Serial.print("  CC "); Serial.print(tm_correct_count);
+             //  Serial.print("  Cal "); Serial.print(cal_result);
+             //  Serial.println();
            }
            else print_stats(0,errors);
 
@@ -1404,6 +1423,42 @@ char ch;
     }    // end integration timer
   }      // loops - repeat for lost milliseconds if any
 }
+
+void dbug_errors(uint8_t st,uint8_t errors,char val_print,uint8_t early, uint8_t late){
+static uint8_t stat, err, vp, earl, lt;
+
+     if( st == 1 ) stat = 1;        // flag for start of new data
+     
+     switch( stat ){
+       case 1:                      // save the data
+          err = errors, vp = val_print, earl = early, lt = late;
+          ++stat;
+          break;
+       case 2:                      // print first group   
+          Serial.print("  Err "); Serial.print(err); Serial.write(vp);
+          Serial.print("  Clk ");  Serial.print(earl);
+          Serial.write(',');   Serial.print(lt);
+          ++stat;
+          break;
+       case 3:  
+          print_stats(1,err);
+          ++stat;
+          break;
+       case 4:              
+          Serial.print("  FF "); Serial.print(FF);  
+          Serial.write(' ');  Serial.print(ff);
+          Serial.print("  Drift ");   Serial.print((int)drift/100);
+          ++stat;
+          break;
+       case 5:   
+          Serial.print("  CC "); Serial.print(tm_correct_count);
+          Serial.print("  Cal "); Serial.print(cal_result);
+          Serial.println();
+          ++stat;
+          break;
+     }
+}
+
 
 void print_date_time(){
 
