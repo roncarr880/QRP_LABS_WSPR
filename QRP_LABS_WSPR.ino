@@ -657,7 +657,7 @@ uint64_t save;
        // Serial.print("Hour bits"); Serial.println(val,BIN);
        save = wwvb_data;
        wwvb_data = val;
-       wwvb_data <<= 64-18;
+       wwvb_data <<= 59-18;
        ghr = wwvb_decode2( 18, 0x3f );
        wwvb_data = save;
        mask = 0;            // start over or just disable.  Will it decode every minute now.
@@ -688,7 +688,7 @@ uint64_t save;
           //Serial.println("Date");
           save = wwvb_data;
           wwvb_data = val;
-          wwvb_data <<= 64-33;
+          wwvb_data <<= 59-33;
           tot_days = wwvb_decode2( 33, 0xfff );
           calc_date();
           wwvb_data = save;
@@ -719,7 +719,7 @@ uint64_t save;
    if( mask == 0xff ){
           save = wwvb_data;
           wwvb_data = val;
-          wwvb_data <<= 64-53;
+          wwvb_data <<= 59-53;
           gyr = wwvb_decode2( 53, 0xff );
           wwvb_data = save;
           mask = 0x10;       
