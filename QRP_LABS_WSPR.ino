@@ -542,12 +542,11 @@ int w;
     
        trends[i] = trend_t + count;       // save new trend values
 
-       // some unnessary playing around
-       if( decodes == 0 && ( count >= LIMIT/2 || trend_t == SYNC || i == 8 ) ) part_decode(i);
+       // some unnessary playing around. Partial decode turned out to be not useful.
+       // if( decodes == 0 && ( count >= LIMIT/2 || trend_t == SYNC || i == 8 ) ) part_decode(i);
        
-
        // return history on errors with only 1 bit incorrect
-       if( new_t == ERR && count == LIMIT  ){
+       if( new_t == ERR && count == LIMIT ){
           if( trend_t == ZEROS ){
               if( bit_errors(dat,0xfc,i) < 2 ) val = 'o';
           }
@@ -572,13 +571,16 @@ int w;
 }
 
 
+// return the number of bits different between mask and value
 int bit_errors( uint8_t val, uint8_t mask, int i ){
 int count;
 uint8_t b;
 
    // only here if the val did not decode as exact
    // provide different levels of correction depending upon what field the val is in.
-   if( i < 9 && i != 4 && i != 0 ) return 8;        // require exact decode in the minutes field
+   // bit 1 that follows the double sync seems to be the most likely bit to decode incorrectly
+   // require the double sync and other bits to all decode without correcting any bit errors bits 59-9
+   if( i <= 9 || i == 59 ) return 8;        // require exact decode in the minutes field
 
    // hours field changes once per hour, don't correct bit pattern 11111000 which has one bit error for
    // both a 0 and a 1.
@@ -593,137 +595,8 @@ uint8_t b;
        if( val & b ) ++count;
        b >>= 1;  
    }
-
-   if( i >= 19 ) --count;     // allow two bit errors on the bytes that only change once a year
    
    return count;
-
-}
-
-// regular decode needs 64 bits correct on the same minute.  This decode builds each bit by itsself.
-// Will probably decode incorrectly at some error rate.  Found to be not very useful as weak signals decode
-// mostly as zeros
-void part_decode( int i ){
-#define SYNC 32
-#define ONES 64
-#define ZEROS 128
-static int8_t offset = SYNC;
-uint8_t count,type,b;
-static int8_t sync_val, sync_mod;
-
-    if( i < 8 || i > 56 ) return;
-    if( i == 8 ) sync_val = 0, sync_mod = 128;    // reset sync count
-    
-    type = trends[i] & ( SYNC | ONES | ZEROS );
-    count = trends[i] & 31;
-    
-    // first need to find the offset so bits go in correct place. i should be close to 9 mod 10.
-    if( offset == SYNC ){
-        if( type != SYNC ) return;
-        b = i % 10;
-        if( b != sync_mod ) sync_val = 0, sync_mod = b;    // reset on no match
-        sync_val += count; 
-        if( sync_val < 4 ) return;
-        offset = sync_mod;
-        if( offset < 5 ) offset += 10;
-        offset = 9 - offset;
-        // Serial.print("Offset "); Serial.println(offset);
-        return;
-    }
-    if( type == SYNC ) return;      // don't need to look at syncs anymore
-
-    i = i + offset;
-    b = ( type == ONES )? 1:0;
-
-    if( i < 19 ) part_decode_hours(i,b);
-    if( i > 21 ) part_decode_date(i,b);
-  
-}
-
-void part_decode_hours( int i, uint8_t dat ){
-static uint8_t mask,val;
-uint8_t setb,clearb;
-uint64_t save;
-
-   setb = 1;  clearb = 0xff;
-   i = 18 - i;
-   while( i-- ) setb <<= 1;
-   clearb ^= setb;
-   mask |= setb;
-   if( dat ) val |= setb;
-   else val &= clearb;
-
-   if( mask == 0x7f ){
-       // Serial.print("Hour bits"); Serial.println(val,BIN);
-       save = wwvb_data;
-       wwvb_data = val;
-       wwvb_data <<= 59-18;
-       ghr = wwvb_decode2( 18, 0x3f );
-       wwvb_data = save;
-       mask = 0;            // start over or just disable.  Will it decode every minute now.
-   }
-  
-}
-
-void part_decode_date( int i, uint8_t dat ){
-static uint16_t mask = 0xf010;
-static uint16_t val;
-uint16_t setb,clearb;
-uint64_t save;
-
-    if( i == 55 ){
-       leap = dat;
-       return;
-    }
-
-    if( i <= 33 ){
-       setb = 1;  clearb = 0xffff;
-       i = 33 - i;
-       while( i-- ) setb <<= 1;
-       clearb ^= setb;
-       mask |= setb;
-       if( dat ) val |= setb;
-       else val &= clearb;
-       if( mask == 0xffff ){
-          //Serial.println("Date");
-          save = wwvb_data;
-          wwvb_data = val;
-          wwvb_data <<= 59-33;
-          tot_days = wwvb_decode2( 33, 0xfff );
-          calc_date();
-          wwvb_data = save;
-          mask = 0xf010;
-       }   
-    }
-    else part_decode_year(i,dat);
-  
-}
-
-// this will fail year 2080 as only looking at 8 bits
-void part_decode_year( int i, uint8_t dat ){
-static uint8_t mask = 0x10;
-static uint8_t val;
-uint8_t setb,clearb;
-uint64_t save;
-
-   if( i > 53 || i < 46 ) return;
-
-   setb = 1;  clearb = 0xff;
-   i = 53 - i;
-   while( i-- ) setb <<= 1;
-   clearb ^= setb;
-   mask |= setb;
-   if( dat ) val |= setb;
-   else val &= clearb;
-
-   if( mask == 0xff ){
-          save = wwvb_data;
-          wwvb_data = val;
-          wwvb_data <<= 59-53;
-          gyr = wwvb_decode2( 53, 0xff );
-          wwvb_data = save;
-          mask = 0x10;       
-   }
 
 }
 
@@ -1930,6 +1803,135 @@ uint8_t changed;                        // correct for seasonal temperature vari
        si_pll_x(PLLB,cal_freq,cal_divider,0);   // calibrate frequency on clock 2
        si_pll_x(PLLA,Rdiv*4*freq,divider,0);    // receiver 4x clock
     }
+}
+
+// regular decode needs 64 bits correct on the same minute.  This decode builds each bit by itsself.
+// Will probably decode incorrectly at some error rate.  Found to be not very useful as weak signals decode
+// mostly as zeros and when the signal improves and these algorithms get a decode,
+// an error free regular decode quickly follows
+
+void part_decode( int i ){
+#define SYNC 32
+#define ONES 64
+#define ZEROS 128
+static int8_t offset = SYNC;
+uint8_t count,type,b;
+static int8_t sync_val, sync_mod;
+
+    if( i < 8 || i > 56 ) return;
+    if( i == 8 ) sync_val = 0, sync_mod = 128;    // reset sync count
+    
+    type = trends[i] & ( SYNC | ONES | ZEROS );
+    count = trends[i] & 31;
+    
+    // first need to find the offset so bits go in correct place. i should be close to 9 mod 10.
+    if( offset == SYNC ){
+        if( type != SYNC ) return;
+        b = i % 10;
+        if( b != sync_mod ) sync_val = 0, sync_mod = b;    // reset on no match
+        sync_val += count; 
+        if( sync_val < 4 ) return;
+        offset = sync_mod;
+        if( offset < 5 ) offset += 10;
+        offset = 9 - offset;
+        // Serial.print("Offset "); Serial.println(offset);
+        return;
+    }
+    if( type == SYNC ) return;      // don't need to look at syncs anymore
+
+    i = i + offset;
+    b = ( type == ONES )? 1:0;
+
+    if( i < 19 ) part_decode_hours(i,b);
+    if( i > 21 ) part_decode_date(i,b);
+  
+}
+
+void part_decode_hours( int i, uint8_t dat ){
+static uint8_t mask,val;
+uint8_t setb,clearb;
+uint64_t save;
+
+   setb = 1;  clearb = 0xff;
+   i = 18 - i;
+   while( i-- ) setb <<= 1;
+   clearb ^= setb;
+   mask |= setb;
+   if( dat ) val |= setb;
+   else val &= clearb;
+
+   if( mask == 0x7f ){
+       // Serial.print("Hour bits"); Serial.println(val,BIN);
+       save = wwvb_data;
+       wwvb_data = val;
+       wwvb_data <<= 59-18;
+       ghr = wwvb_decode2( 18, 0x3f );
+       wwvb_data = save;
+       mask = 0;            // start over or just disable.  Will it decode every minute now.
+   }
+  
+}
+
+void part_decode_date( int i, uint8_t dat ){
+static uint16_t mask = 0xf010;
+static uint16_t val;
+uint16_t setb,clearb;
+uint64_t save;
+
+    if( i == 55 ){
+       leap = dat;
+       return;
+    }
+
+    if( i <= 33 ){
+       setb = 1;  clearb = 0xffff;
+       i = 33 - i;
+       while( i-- ) setb <<= 1;
+       clearb ^= setb;
+       mask |= setb;
+       if( dat ) val |= setb;
+       else val &= clearb;
+       if( mask == 0xffff ){
+          //Serial.println("Date");
+          save = wwvb_data;
+          wwvb_data = val;
+          wwvb_data <<= 59-33;
+          tot_days = wwvb_decode2( 33, 0xfff );
+          calc_date();
+          wwvb_data = save;
+          mask = 0xf010;
+       }   
+    }
+    else part_decode_year(i,dat);
+  
+}
+
+// this will fail year 2080 as only looking at 8 bits
+void part_decode_year( int i, uint8_t dat ){
+static uint8_t mask = 0x10;
+static uint8_t val;
+uint8_t setb,clearb;
+uint64_t save;
+
+   if( i > 53 || i < 46 ) return;
+
+   setb = 1;  clearb = 0xff;
+   i = 53 - i;
+   while( i-- ) setb <<= 1;
+   clearb ^= setb;
+   mask |= setb;
+   if( dat ) val |= setb;
+   else val &= clearb;
+
+   if( mask == 0xff ){
+          save = wwvb_data;
+          wwvb_data = val;
+          wwvb_data <<= 59-53;
+          gyr = wwvb_decode2( 53, 0xff );
+          wwvb_data = save;
+          mask = 0x10;       
+   }
+
 }
 
 
