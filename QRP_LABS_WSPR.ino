@@ -1366,9 +1366,9 @@ char ch;
            if( ch == 'o' ) b = 0, e = 0;
            if( ch == 's' ) s = 1, e = 0;
            if( ch == 'i' ) b = 1, e = 0;
-           ++errors;
+           // ++errors;
         }
-        // if( e ) ++errors;
+        if( e ) ++errors;
         
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
