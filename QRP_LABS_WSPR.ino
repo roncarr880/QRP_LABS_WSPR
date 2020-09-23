@@ -141,9 +141,9 @@ int gmon = 1,gday = 1,gyr = 1,ghr,gmin;
 int tot_days = 1;
 uint16_t leap = 1;
 
-#define TK 4        // keep time has been run
+// #define TK 4        // keep time has been run
 #define TS 2        // time was set from WWVB decode
-#define TP 1        // print decode indicator
+// #define TP 1        // print decode indicator
 uint8_t time_flags; // WWVB encodes the previous minute, flags to print the correct time
 
 uint8_t trends[60];
@@ -377,6 +377,7 @@ uint8_t i;
   gmin = mn;
   gyr = yr;
   tot_days = dy;
+  keep_time();            // wwvb sends minute just ended info, so increment
   calc_date( );
   time_flags |= TS;
 
@@ -814,8 +815,8 @@ void keep_time(){
       }
    }
   
-   if( time_flags & TS ) time_flags = TP + TK;     // clear TS but flag a print of wwvb decode indicator
-   else  time_flags = TK;
+  // if( time_flags & TS ) time_flags = TP + TK;     // clear TS but flag a print of wwvb decode indicator
+  // else  time_flags = TK;
 
 }
 
@@ -1392,7 +1393,9 @@ char ch;
            
            // running in print,       wwvb decode,   keep_time order    or
            //         in wwvb decode, print,         keep_time order    this case needs a time update
-           if( time_flags & TS ) keep_time();  // need to increment the time since the last decode
+           // if( time_flags & TS ) keep_time();  // need to increment the time since the last decode
+           // new method = time +- 30 seconds is printed as current time. This routine will eventually seem to
+           // skip ahead a minute to catch up in actual time.
     
                  // debug print out some stats when in test mode
                  // break this up for 1200 baud, takes too much time and causes missed decode after line feed                
@@ -1418,7 +1421,7 @@ char ch;
            }
            else print_stats(0,errors);
 
-           time_flags = 0;
+           // time_flags = 0;
            
            dither = ( errors >> 4 ) + 1;
            early = late = secs = errors = 0;   // reset the stats for the next minute
@@ -1480,7 +1483,7 @@ void print_date_time(){
    if( gmin < 10 ) Serial.write('0');
    Serial.print(gmin);
 
-   if( time_flags & TP ) Serial.write('*');
+   if( time_flags & TS ) Serial.write('*'), time_flags = 0;      // decode from wwvb flagged
    else Serial.write(' ');
   
 }
