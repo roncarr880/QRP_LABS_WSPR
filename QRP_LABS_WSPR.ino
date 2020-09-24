@@ -135,6 +135,7 @@ int frame_msec;
 int FF = 3;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
 int ff = 0;        // fractional part of the fudge factor ( floats not useful as limited in significant figures )
 
+uint8_t dbug_print_state;   // print messages at 1200 baud without blocking
 
 // date, time keeping
 int gmon = 1,gday = 1,gyr = 1,ghr,gmin;
@@ -306,6 +307,10 @@ static int temp;            // just for flashing the LED when there is I2C activ
          if( temp ) digitalWrite(13,HIGH);
          else       digitalWrite(13,LOW);   
        }
+
+       // print out debug messages without waiting for the serial ready
+       if( wwvb_quiet == 1 && dbug_print_state && Serial.availableForWrite() > 20) dbug_errors( 0, 0, 0, 0, 0 );
+
    }
 
 }
@@ -1323,8 +1328,6 @@ char ch;
       wwvb_tmp |= b;
       wwvb_sum = 0;
 
-      dbug_errors( 0, 0, 0, 0, 0 );
-
       // 8 dumps of the integrator is one second, decode this bit ?
       wwvb_count++;
       wwvb_count &= 7;
@@ -1434,36 +1437,36 @@ char ch;
 }
 
 void dbug_errors(uint8_t st,uint8_t errors,char val_print,uint8_t early, uint8_t late){
-static uint8_t stat, err, vp, earl, lt;
+static uint8_t err, vp, earl, lt;
 
-     if( st == 1 ) stat = 1;        // flag for start of new data
+     if( st == 1 ) dbug_print_state = 1;        // flag for start of new data
      
-     switch( stat ){
+     switch( dbug_print_state ){
        case 1:                      // save the data
           err = errors, vp = val_print, earl = early, lt = late;
-          ++stat;
+          ++dbug_print_state;
           break;
        case 2:                      // print first group   
           Serial.print("  Err "); Serial.print(err); Serial.write(vp);
           Serial.print("  Clk ");  Serial.print(earl);
           Serial.write(',');   Serial.print(lt);
-          ++stat;
+          ++dbug_print_state;
           break;
        case 3:  
           print_stats(1,err);
-          ++stat;
+          ++dbug_print_state;
           break;
        case 4:              
           Serial.print("  FF "); Serial.print(FF);  
           Serial.write(' ');  Serial.print(ff);
           Serial.print("  Drift ");   Serial.print((int)drift/100);
-          ++stat;
+          ++dbug_print_state;
           break;
        case 5:   
           Serial.print("  CC "); Serial.print(tm_correct_count);
           Serial.print("  Cal "); Serial.print(cal_result);
           Serial.println();
-          ++stat;
+          dbug_print_state = 0;
           break;
      }
 }
