@@ -1365,13 +1365,12 @@ char ch;
         else if( b == 1 ) ch = '1';
         ch = wwvb_trends(ch , wwvb_tmp);
 
-      // decode from trends
-        if( e ){
-           if( ch == 'o' ) b = 0, e = 0;
-           if( ch == 's' ) s = 1, e = 0;
-           if( ch == 'i' ) b = 1, e = 0;
-           // ++errors;
-        }
+        // decode from trends
+        if( ch == 'o' ) b = 0, e = 0;
+        if( ch == 's' ) s = 1, e = 0;
+        if( ch == 'i' ) b = 1, e = 0;
+        if( ch == 'x' ) e = 1;               // flag as error if decoded different from the past history
+
         if( e ) ++errors;
         
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
