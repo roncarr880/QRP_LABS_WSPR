@@ -1,6 +1,9 @@
 // !!! note:  there is a loose connection somewhere in the headers or the jumper wires to the headers.  It will 
 //            hang in setup on I2C commands sometimes.  Maybe the clock or maybe the screw that contacts the USB 
 //            jack is keeping the boards too far apart.  Just a note for when it happens again.
+//  my common startup commands with WWVB logging
+//  enter 1 CAT command, ?V for Rx only or #0 to stay in FRAME TX mode
+
 // QRP_LABS_WSPR
 //   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module, QRP Labs relay board.
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
@@ -150,6 +153,7 @@ uint8_t time_flags; // WWVB encodes the previous minute, flags to print the corr
 uint8_t trends[60];
 uint8_t clr_trends;
 unsigned int decodes;
+uint8_t report_i;      // see if a single trend shows the lsb of minutes position in time.
 /***************************************************************************/
 
 void ee_save(){ 
@@ -500,6 +504,7 @@ static int unslip;
 uint8_t count;
 uint8_t trend_t,new_t;
 int w;
+static int s_count;     // counts from last sync - detect when spaced 9 apart. Most are 10 apart.
 
 #define LIMIT 6         // 2 min 30 max
 #define SYNC 32
@@ -519,8 +524,8 @@ int w;
        if( frame_sec < 60 && (frame_msec < 400 || frame_msec > 600) ){
            if( frame_sec == 0 && frame_msec > 600 ) ;       // ok, just early
            else if( frame_sec == 1 && frame_msec < 400 ) ;  // also ok
-           else if( frame_sec < 30 && frame_sec > 0 ) ++i;  // running slow is normal on weak signals
-           else unslip = 1;                                 // probably a time reset or decode happened
+           else if( frame_sec < 30 && frame_sec > 0 ) ++i, report_i = 0;  // running slow is normal on weak signals
+           else unslip = 1, report_i = 0;;                                // probably a time reset or decode happened
        }
     }
 
@@ -531,7 +536,14 @@ int w;
        new_t = ERR;                                        // assume error
        if( val == 'S' ) new_t = SYNC;
        if( val == '1' ) new_t = ONES;
-       if( val == '0' ) new_t = ZEROS;       
+       if( val == '0' ) new_t = ZEROS;
+
+       ++s_count;                   // count from the last sync.  Attempt early sync to 9 syncs spacing.
+       if( new_t == SYNC ){
+            if( s_count == 9 ) report_i = i;
+            if( s_count == 1 ) report_i = (i+9) % 60;     // double sync detect
+            s_count = 0;
+       }
 
        if( trend_t == new_t && trend_t != ERR ){          // increment the trend if match
            if( count < LIMIT ) ++count;
@@ -542,7 +554,7 @@ int w;
          if( count > 1 ) count -=  ( trend_t == SYNC ? 1 : 2 );   // age existing type, favor sync
          else{
             count = 1;          
-            trend_t = new_t; 
+            trend_t = new_t;
          }
        }
     
@@ -1403,6 +1415,7 @@ char ch;
                  // break this up for 1200 baud, takes too much time and causes missed decode after line feed                
            if( wwvb_quiet == 1 ){
                Serial.write(' ');
+               Serial.print(report_i);  Serial.write(' ');
                print_date_time();       
                Serial.write(' '); 
                if( frame_msec < 100 ) Serial.write(' ');
@@ -1422,6 +1435,13 @@ char ch;
              //  Serial.println();
            }
            else print_stats(0,errors);
+
+           // use stats for an early sync to correct second
+           if( decodes == 0 && errors < 45 && report_i > 0 && report_i < 20 ){
+              if( report_i < 9 ) tm_correction2 += 100;
+              if( report_i > 9 ) tm_correction2 -= 100;
+             // if( report_i != 9 ) report_i = 0;         // one time only for each detect( now one second adjust )
+           }
 
            // time_flags = 0;
            
