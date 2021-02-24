@@ -1,6 +1,7 @@
 // !!! note:  there is a loose connection somewhere in the headers or the jumper wires to the headers.  It will 
 //            hang in setup on I2C commands sometimes.  Maybe the clock or maybe the screw that contacts the USB 
 //            jack is keeping the boards too far apart.  Just a note for when it happens again.
+//            This may be a USB flakey cable issue.
 //  my common startup commands with WWVB logging
 //  enter 1 CAT command, ?V for Rx only or #0 to stay in FRAME TX mode
 
@@ -23,6 +24,18 @@
 
 #include <FreqCount.h>   // one UNO I have does not work correctly with this library, another one does
 #include <EEPROM.h>
+#include <OLED1306_Basic.h>
+
+#define ROW0 0          // text based rows for the 128x64 OLED
+#define ROW1 8
+#define ROW2  16
+#define ROW3  24
+#define ROW4  32
+#define ROW5  40
+#define ROW6  48
+#define ROW7  56
+
+
 
 #define SI5351   0x60    // i2c address
 #define PLLA 26          // register address offsets for PLL's
@@ -49,6 +62,13 @@
 
 #define stage(c) Serial.write(c)
 
+OLED1306 LCD;            // a modified version of LCD_BASIC by Rinky-Dink Electronics
+
+extern unsigned char SmallFont[];
+extern unsigned char MediumNumbers[];
+extern unsigned char BigNumbers[];
+
+
 int last_error_count = 60;
 char val_print = ' ';
 
@@ -68,7 +88,7 @@ const uint32_t cal_divider = 200;
 uint32_t divider = DIV;
 uint32_t audio_freq = 1466;          // wspr 1400 to 1600 offset from base vfo freq 
 uint8_t  Rdiv = RDIV; 
-uint8_t operate_mode = FRAME_MODE;   // start in stand alone timing mode
+uint8_t operate_mode = FRAME_MODE;     //FRAME_MODE  CAT_MODE // start in stand alone timing mode
 uint8_t wspr_tx_enable;              // transmit enable
 uint8_t wspr_tx_cancel;              // CAT control RX command cancels tx
 uint8_t cal_enable;
@@ -99,6 +119,8 @@ struct BAND {
    uint32_t  low;    // low frequency limit
    uint32_t high;    // high frewquency limit
 };
+uint8_t wband = 3;           // wspr band switching via encoder long press
+uint8_t sstate[1];           // switch state, one switch
 
 //  relay board was jumpered to NOT have filter 1 always in line and antenna connects to the bnc 
 //  on the arduino shield.  ( otherwise highest freq would need to be in position 1 and output would 
@@ -154,6 +176,8 @@ uint8_t trends[60];
 uint8_t clr_trends;
 unsigned int decodes;
 uint8_t report_i;      // see if a single trend shows the lsb of minutes position in time.
+
+long int stp = 1000;
 /***************************************************************************/
 
 void ee_save(){ 
@@ -238,7 +262,91 @@ uint8_t i;
   band_change();  // select the correct relay
   //Serial.println(F("Starting..."));
   pinMode(13,OUTPUT);
+
+  LCD.InitLCD();                        // using a modified Nokia library for the OLED
+  LCD.setFont(SmallFont);
+  LCD.clrScr();
+  LCD.print("QRP-LABS WSPR SDR",0,ROW0);
+  i2flush();
+  delay(2000);
+ // LCD.clrRow(0);   // ? clear to end from current position 
+  LCD.clrScr();
+  
+  freq_display();
+  mode_display();
 }
+
+int8_t encoder(){   /* read encoder, return 1, 0, or -1 */
+  
+static int8_t mod;     /* encoder is divided by 4 because it has detents */
+static int8_t dir;     /* need same direction as last time, effective debounce */
+static int8_t last;    /* save the previous reading */
+int8_t new_;     /* this reading */
+int8_t b;
+
+   new_ = (PIND >> 2) & 3;  
+   if( new_ == last ) return 0;       /* no change */
+
+   b = ( (last << 1) ^ new_ ) & 2;  /* direction 2 or 0 from xor of last shifted and new data */
+   last = new_;
+   if( b != dir ){
+      dir = b;
+      return 0;      /* require two in the same direction serves as debounce */
+   }
+   mod = (mod + 1) & 3;       /* divide by 4 for encoder with detents */
+   if( mod != 2 ) return 0;
+
+   if( dir == 2 ) return 1;   /* swap return values if it works backwards */
+   else return -1;
+}
+
+  /* switch states */
+#define IDLE_ 0
+#define ARM  1
+#define DARM 2
+#define DONE 3
+#define TAP  4
+#define DTAP 5
+#define LONGP 6
+      /* run the switch state machine, generic code for multiple switches even though have only one here */
+int8_t switches(){
+static uint8_t press_, nopress;
+static uint32_t tm;
+int  i,j;
+int8_t sw;
+int8_t s;
+
+   if( tm == millis() ) return 0;      // run once per millisecond
+   tm = millis();
+   
+   /* get the switch readings, low active but invert bits */
+   sw = ((PIND & 0x10) >> 4) ^ 0x01;                 
+   
+   if( sw ) ++press_, nopress = 0;       /* only acting on one switch at a time */
+   else ++nopress, press_ = 0;           /* so these simple vars work for all of them */
+
+   /* run the state machine for all switches in a loop */
+   for( i = 0, j = 1; i < 1; ++i ){
+      s = sstate[i];
+      switch(s){
+         case DONE:  if( nopress >= 100 ) s = IDLE_;  break;
+         case IDLE_:  if( ( j & sw ) && press_ >= 30 ) s = ARM;  break; /* pressed */
+         case ARM:
+            if( nopress >= 30 ) s = DARM;                      /* it will be a tap or double tap */
+            if( press_ >= 240 ) s = LONGP;                     // long press
+         break;
+         case DARM:
+            if( nopress >= 240 )  s = TAP;
+            if( press_ >= 30 )    s = DTAP;
+         break;
+      }      
+      sstate[i] = s; 
+      j <<= 1;
+   }
+   
+   return sstate[0];      // only one switch implemented so can return its value
+}
+
 
 uint8_t  band_change(){
 
@@ -287,12 +395,15 @@ static uint32_t old_freq = 0;
       si_load_divider(divider,0,0,Rdiv*4);   // tx at 1/4 the rx freq
       si_load_divider(divider,1,1,Rdiv);  // load rx divider and reset PLL
   }
+
+  freq_display();
   
 }
 
 void loop() {
 static unsigned long ms;
 static int temp;            // just for flashing the LED when there is I2C activity. Check for I2C hangup.
+int8_t t;
 
    if( Serial.availableForWrite() > 20 ) radio_control();
    temp += i2poll();
@@ -315,6 +426,29 @@ static int temp;            // just for flashing the LED when there is I2C activ
        // print out debug messages without waiting for the serial ready
        if( wwvb_quiet == 1 && dbug_print_state && Serial.availableForWrite() > 20) dbug_errors( 0, 0, 0, 0, 0 );
 
+       t = encoder();
+       if( t ){
+          qsy( freq + t * stp );
+       }
+
+       t = switches();
+       if( t > DONE ){
+           switch(t){
+              case TAP:
+                 stp /= 10;
+                 if( stp == 1 ) stp = 1000000;   
+              break;
+              case DTAP:
+                 operate_mode ^= 1;
+              break;
+              case LONGP:
+                 if(++wband > 9 ) wband = 0;
+                 qsy(magic_freq[wband]);
+              break;
+           }
+           sstate[0] = DONE;
+           mode_display();
+       }
    }
 
 }
@@ -577,8 +711,11 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
        }
 
       
-       if( i == 0 && val == '.' ) val = 'Z';   //  view index on no decode no history    
-    
+       if( i == 0 && val == '.' ) val = 'Z';   //  view index on no decode no history   
+       if( i == 0 ) disp_date_time();
+       LCD.gotoRowCol(7,110);
+       LCD.putch(val);
+        
     if( wwvb_quiet == 1 ){  
        Serial.write(val);
        if( i%10 == 9 ) Serial.write(' ');
@@ -964,6 +1101,25 @@ uint8_t R;
    if( rst ) i2cd( SI5351, 177, 0xAC );         // PLLA PLLB soft reset needed
 }
 
+void freq_display(){
+int rem;
+  
+   LCD.setFont(MediumNumbers);
+   LCD.printNumI(freq/1000,0,ROW0,5,'/');       // '/' is a leading space with this font table
+   LCD.setFont(SmallFont);
+   rem = freq % 1000;
+   LCD.printNumI(rem,64,ROW0,3,'0');   
+}
+
+// display mode and step
+void mode_display(){
+
+   LCD.setFont(SmallFont); 
+   if( operate_mode == CAT_MODE ) LCD.print(" CAT",RIGHT,ROW0);
+   else LCD.print("WSPR",RIGHT,ROW0);
+
+   LCD.printNumI(stp,RIGHT,ROW1,7,' ');
+}
 
 /*****************************************************************************************/
 // TenTec Argonaut V CAT emulation
@@ -1221,7 +1377,7 @@ int dat;
   i2send( dat );
 }
 
-void i2send( int data ){   // just save stuff in the buffer
+void i2send( unsigned int data ){   // just save stuff in the buffer
 uint8_t t;
 
   // but check for space first
@@ -1230,6 +1386,7 @@ uint8_t t;
   
   i2buf[i2in++] = data;
   i2in &= (I2BUFSIZE - 1);
+  i2poll();
 }
 
 void i2stop( ){
@@ -1275,7 +1432,7 @@ static uint8_t delay_counter;
            else{   // just data to send
               TWDR = data;
               TWCR = (1<<TWINT) | (1<<TWEN);
-              delay_counter = 10;   // delay for transmit active to come true
+              delay_counter = 1;   // delay for transmit active to come true
               state = 2;
            }
         }
@@ -1285,7 +1442,7 @@ static uint8_t delay_counter;
             state = 2;
             TWDR = data;
             TWCR = (1<<TWINT) | (1<<TWEN);
-            delay_counter = 10;
+            delay_counter = 1;
          }
       break;
       case 2:  // wait for ack/nack done and tbuffer empty, blind to success or fail
@@ -1296,7 +1453,7 @@ static uint8_t delay_counter;
       case 3:  // wait for stop to clear
          if( (TWCR & (1<<TWSTO)) == 0 ){
             state = 0;
-            delay_counter = 10;  // a little delay at the end of a sequence
+            delay_counter = 1;  // a little delay at the end of a sequence
          }
       break;    
    }
@@ -1437,13 +1594,16 @@ char ch;
            else print_stats(0,errors);
 
            // use stats for an early sync to correct second
-           if( decodes == 0 && errors < 45 && report_i > 0 && report_i < 20 ){
+           if( decodes == 0 && report_i > 0 && report_i < 20 ){
               if( report_i < 9 ) tm_correction2 += 100;
               if( report_i > 9 ) tm_correction2 -= 100;
              // if( report_i != 9 ) report_i = 0;         // one time only for each detect( now one second adjust )
            }
 
            // time_flags = 0;
+          // LCD.setFont(MediumNumbers);
+          // LCD.printNumI(errors,RIGHT,ROW0,2,'/');
+          LCD.printNumI(frame_msec,RIGHT,ROW5,3,'/');
            
            dither = ( errors >> 4 ) + 1;
            early = late = secs = errors = 0;   // reset the stats for the next minute
@@ -1508,6 +1668,17 @@ void print_date_time(){
    if( time_flags & TS ) Serial.write('*'), time_flags = 0;      // decode from wwvb flagged
    else Serial.write(' ');
   
+}
+
+void disp_date_time(){
+   LCD.setFont(MediumNumbers);
+   LCD.printNumI(gmon,LEFT,ROW2,2,'0');
+   LCD.printNumI(gday,40,ROW2,2,'0');
+   LCD.printNumI(gyr,80,ROW2,2,'0');
+   LCD.setFont(BigNumbers);
+   LCD.printNumI(ghr,0,ROW5,2,'0');
+   LCD.printNumI(gmin,40,ROW5,2,'0');
+   LCD.setFont(SmallFont);
 }
 
 void gather_stats( uint8_t data, uint8_t err ){
