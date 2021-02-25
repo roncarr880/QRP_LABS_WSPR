@@ -12,6 +12,11 @@
 
 //   The CAT emulation is TenTec Argonaut V at 1200 baud.
 
+// New encoder switch commands:
+//   Tap : change tuning step 10hz to 1Meg
+//   DTap: toggle mode WSPR TX Frame to CAT control - RX mode
+//   Long: change band
+
 //   To set a new operation frequency for stand alone Frame Mode, restart the Arduino, start wsjt-x or HRD.
 //   Tune to one of the magic WSPR frequencies and toggle TX (tune in wsjt will work).
 //   The new frequency will be stored in EEPROM.
@@ -58,7 +63,7 @@
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 48
 
-#define DEADBAND 25                 // wwvb signal timing +-deadband 
+#define DEADBAND 10                 // wwvb signal timing +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -151,6 +156,7 @@ uint8_t wwvb_quiet = 0;  // wwvb debug print flag, set to 1 for printing
                          // or enter 1 CAT command( ?V for Rx only or #0 to stay in FRAME mode with logging )
 uint8_t wwvb_stats[8];   // bit distribution over 60 seconds
 uint8_t wwvb_last_err;   // display last error character received ( will show what causes just one error )
+uint8_t DST;             // daylight savings bit
 
 uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
@@ -490,6 +496,7 @@ uint8_t i;
   hr = wwvb_decode2( 18, 0x3f );
   mn = wwvb_decode2( 8, 0xff );
   leap = wwvb_decode2( 55, 0x1 );
+  DST  = wwvb_decode2( 58, 0x1 );    // in effect bit
 
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
                             // only apply clock corrections in the middle of the two minute frame or may
@@ -715,6 +722,7 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
        if( i == 0 ) disp_date_time();
        LCD.gotoRowCol(7,110);
        LCD.putch(val);
+       LCD.printNumI(i,75,ROW7,2,'0');
         
     if( wwvb_quiet == 1 ){  
        Serial.write(val);
@@ -1173,6 +1181,7 @@ int done;
       get_cmd();
       operate_mode = CAT_MODE;            // switch modes on query cat command
       if( wwvb_quiet < 2 ) ++wwvb_quiet;  // only one CAT command enables wwvb logging, 2nd or more turns it off
+      mode_display();
     }
     if( cmd == '*' )  set_cmd();
     if( cmd == '#' ){
@@ -1603,7 +1612,9 @@ char ch;
            // time_flags = 0;
           // LCD.setFont(MediumNumbers);
           // LCD.printNumI(errors,RIGHT,ROW0,2,'/');
-          LCD.printNumI(frame_msec,RIGHT,ROW5,3,'/');
+          LCD.printNumI(frame_msec,RIGHT,ROW5,3,'0');
+          LCD.printNumI(FF,100,ROW6);
+          LCD.printNumI(ff,RIGHT,ROW6,2,' ');
            
            dither = ( errors >> 4 ) + 1;
            early = late = secs = errors = 0;   // reset the stats for the next minute
@@ -1671,12 +1682,20 @@ void print_date_time(){
 }
 
 void disp_date_time(){
+int local_hr;           // display local time for eastern timezone
+
+   local_hr = ghr - 5 + DST;
+   if( local_hr < 0 ) local_hr += 24;
+   if( local_hr > 11 ) local_hr -= 12;
+   if( local_hr == 0 ) local_hr = 12;
+  
    LCD.setFont(MediumNumbers);
    LCD.printNumI(gmon,LEFT,ROW2,2,'0');
    LCD.printNumI(gday,40,ROW2,2,'0');
    LCD.printNumI(gyr,80,ROW2,2,'0');
    LCD.setFont(BigNumbers);
-   LCD.printNumI(ghr,0,ROW5,2,'0');
+   // LCD.printNumI(ghr,0,ROW5,2,'/');        // UTC time
+   LCD.printNumI(local_hr,0,ROW5,2,'/');      // local time
    LCD.printNumI(gmin,40,ROW5,2,'0');
    LCD.setFont(SmallFont);
 }
