@@ -63,7 +63,7 @@
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 48
 
-#define DEADBAND 10                 // wwvb signal timing +-deadband 
+#define DEADBAND 50                 // wwvb signal timing +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -163,7 +163,7 @@ int frame_msec;
 // uint8_t tick;         // start each minute,  what was this for ? to match displayed time with computer time
                          // but disturbs the trending bit display
 
-int FF = 3;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
+int FF = 5;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
 int ff = 0;        // fractional part of the fudge factor ( floats not useful as limited in significant figures )
 
 uint8_t dbug_print_state;   // print messages at 1200 baud without blocking
@@ -1492,6 +1492,8 @@ const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000
 static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch;
+static char valp[9];       // LCD display of slow/fast timekeeping
+static int8_t vali;
 
    loops = t - old_t;
    old_t = t;
@@ -1612,8 +1614,12 @@ char ch;
            // time_flags = 0;
           // LCD.setFont(MediumNumbers);
           // LCD.printNumI(errors,RIGHT,ROW0,2,'/');
-          LCD.printNumI(frame_msec,RIGHT,ROW5,3,'0');
+          // LCD.printNumI(frame_msec,RIGHT,ROW5,3,' ');
+          if( val_print != '^' ) valp[vali++] = val_print;
+          vali &= 7;
+          LCD.print(valp,RIGHT,ROW5);
           LCD.printNumI(FF,100,ROW6);
+          LCD.putch(' ');
           LCD.printNumI(ff,RIGHT,ROW6,2,' ');
            
            dither = ( errors >> 4 ) + 1;
