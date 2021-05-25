@@ -1,14 +1,11 @@
-// !!! note:  there is a loose connection somewhere in the headers or the jumper wires to the headers.  It will 
-//            hang in setup on I2C commands sometimes.  Maybe the clock or maybe the screw that contacts the USB 
-//            jack is keeping the boards too far apart.  Just a note for when it happens again.
-//            This may be a USB flakey cable issue.
-//  my common startup commands with WWVB logging
-//  enter 1 CAT command, ?V for Rx only or #0 to stay in FRAME TX mode
 
 // QRP_LABS_WSPR
 //   Arduino, QRP Labs Arduino shield, SI5351 clock, QRP Labs RX module, QRP Labs relay board.
 //   NOTE:  The tx bias pot works in reverse, fully clockwise is off.
 //   Added a CANADAUINO  WWVB interface to keep time.
+
+//  common startup commands with WWVB logging
+//  enter 1 CAT command, ?V for Rx only or #0 to stay in FRAME TX mode
 
 //   The CAT emulation is TenTec Argonaut V at 1200 baud.
 
@@ -63,7 +60,7 @@
 //#define CLK_UPDATE_THRESHOLD  59    // errors allowed per minute to consider valid sync to WWVB
 #define CLK_UPDATE_THRESHOLD2 48
 
-#define DEADBAND 50                 // wwvb signal timing +-deadband 
+#define DEADBAND 25                 // wwvb signal timing +-deadband 
 
 #define stage(c) Serial.write(c)
 
@@ -184,6 +181,8 @@ unsigned int decodes;
 uint8_t report_i;      // see if a single trend shows the lsb of minutes position in time.
 
 long int stp = 1000;
+
+int debug_i;
 /***************************************************************************/
 
 void ee_save(){ 
@@ -484,7 +483,7 @@ uint16_t hr;
 uint16_t mn;
 uint16_t dy;
 uint8_t i;
-// static uint64_t last_good = START_CLOCK_FREQ;
+
 
   tmp2 = frame_sec;
   tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
@@ -493,10 +492,10 @@ uint8_t i;
 
   yr = wwvb_decode2( 53, 0x1ff );   // year is 0 to 99
   dy = wwvb_decode2( 33, 0xfff );   // day is 0 to 365/366
-  hr = wwvb_decode2( 18, 0x3f );
+  hr = wwvb_decode2( 18, 0x7f );
   mn = wwvb_decode2( 8, 0xff );
   leap = wwvb_decode2( 55, 0x1 );
-  DST  = wwvb_decode2( 58, 0x1 );    // in effect bit
+  DST  = wwvb_decode2( 57, 0x1 );    // in effect bit ( using bit 58 gave wrong time for one day )
 
   if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
                             // only apply clock corrections in the middle of the two minute frame or may
@@ -522,7 +521,7 @@ uint8_t i;
     // if( mn < 10 ) Serial.write('0');
     // Serial.println(mn);
   }
-
+    
   ghr = hr;
   gmin = mn;
   gyr = yr;
@@ -546,7 +545,7 @@ uint16_t val;
   if( tmp & 0x80 ) val += 40;
   if( tmp & 0x40 ) val += 20;
   if( tmp & 0x20 ) val += 10;
-  val += tmp & 0xf;
+  val += (tmp & 0xf);
 
   return val;
   
@@ -715,7 +714,7 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
           if( trend_t == SYNC ){
               if( bit_errors(dat,0xc0,i) < 2 ) val = 's';
           }          
-       }
+       } 
 
       
        if( i == 0 && val == '.' ) val = 'Z';   //  view index on no decode no history   
@@ -728,6 +727,8 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
        Serial.write(val);
        if( i%10 == 9 ) Serial.write(' ');
     }
+
+    debug_i = i;
 
     return val;
   
@@ -1472,6 +1473,20 @@ static uint8_t delay_counter;
 }
 
 
+// display a value on blank row 4 in binary
+void debug_print( uint8_t val, int col ){
+int i;
+char c;
+
+    LCD.gotoRowCol(4,col);
+
+    for( i = 0; i < 8; ++i ){
+       c = ( val & 0x80 )? '1' : '0';
+       val <<= 1;
+       LCD.putch(c);        
+    }
+}
+
 // WWVB receiver in a fringe area - integrate the signal to remove noise
 // Although it probably makes more sense to dump the integrator 10 times per second, here we use 8.
 // sample each millisecond, sum 100 or 150 samples , decide if low or high, shift into temp variable
@@ -1493,7 +1508,7 @@ static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch;
 static char valp[9];       // LCD display of slow/fast timekeeping
-static int8_t vali;
+static int8_t vali, valc;
 
    loops = t - old_t;
    old_t = t;
@@ -1544,6 +1559,9 @@ static int8_t vali;
         else if( b == 0 ) ch = '0';
         else if( b == 1 ) ch = '1';
         ch = wwvb_trends(ch , wwvb_tmp);
+
+        debug_print( wwvb_tmp, 20 );
+        if( debug_i == 12 ) debug_print( wwvb_tmp, 80 );
 
         // decode from trends
         if( ch == 'o' ) b = 0, e = 0;
@@ -1615,7 +1633,12 @@ static int8_t vali;
           // LCD.setFont(MediumNumbers);
           // LCD.printNumI(errors,RIGHT,ROW0,2,'/');
           // LCD.printNumI(frame_msec,RIGHT,ROW5,3,' ');
-          if( val_print != '^' ) valp[vali++] = val_print;
+          if( val_print == '-' || val_print == '+' ) valp[vali++] = val_print;    // time trend slow or fast
+          if( val_print == ' ' ){                                                 // time trend keeping time well
+             ++valc;
+             valc &= 63;
+             if( valc == 0 ) valp[vali++] = val_print;
+          }
           vali &= 7;
           LCD.print(valp,RIGHT,ROW5);
           LCD.printNumI(FF,100,ROW6);
@@ -1690,7 +1713,7 @@ void print_date_time(){
 void disp_date_time(){
 int local_hr;           // display local time for eastern timezone
 
-   local_hr = ghr - 5 + DST;
+   local_hr = ghr - 5 + (int)DST;
    if( local_hr < 0 ) local_hr += 24;
    if( local_hr > 11 ) local_hr -= 12;
    if( local_hr == 0 ) local_hr = 12;
@@ -1700,7 +1723,7 @@ int local_hr;           // display local time for eastern timezone
    LCD.printNumI(gday,40,ROW2,2,'0');
    LCD.printNumI(gyr,80,ROW2,2,'0');
    LCD.setFont(BigNumbers);
-   // LCD.printNumI(ghr,0,ROW5,2,'/');        // UTC time
+   //LCD.printNumI(ghr,0,ROW5,2,'/');        // UTC time
    LCD.printNumI(local_hr,0,ROW5,2,'/');      // local time
    LCD.printNumI(gmin,40,ROW5,2,'0');
    LCD.setFont(SmallFont);
