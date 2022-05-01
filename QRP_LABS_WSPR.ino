@@ -24,6 +24,14 @@
 //   R dividers in the SI5351.  Dividers 1 - rx and 4 - tx will cover 1mhz to 30mhz
 //   Dividers 16 - rx and 64 - tx will cover 40 khz to 2 mhz
 
+//   When using even output divider, PLL c parameter...
+//   For 1 hz resolution,  c = CLOCK / divider.
+//   For 1.46 hz resolution, c = CLOCK / ( 1.46 * divider ).
+//     Can then send WSPR by just adding to the b parameter 0,1,2,or3.
+//   Smallest divider for 1 hz resolution, about 26.
+//   Max value of c is 1048575
+//   Use of the R dividers will complicate this.
+
 #include <FreqCount.h>   // one UNO I have does not work correctly with this library, another one does
 #include <EEPROM.h>
 #include <OLED1306_Basic.h>
@@ -53,7 +61,7 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   2700449800LL   // *100 for setting fractional frequency  ( 446600 ) 
+#define START_CLOCK_FREQ   27004498L   // ( 446600 ) 
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
@@ -80,8 +88,8 @@ char val_print = ' ';
   // we are using the post dividers and can receive down to 40khz
   // vco 600 to 900
   
-uint64_t clock_freq = START_CLOCK_FREQ;
-uint64_t drift;                      // calibrate freq result used as a measure of temperature and mapped to correct
+uint32_t clock_freq = START_CLOCK_FREQ;
+uint32_t drift;                      // calibrate freq result used as a measure of temperature and mapped to correct
                                      // 27 master clock drift
 uint32_t freq = FREQ;                // ssb vfo freq
 const uint32_t cal_freq = 3000000;   // calibrate frequency
@@ -620,12 +628,12 @@ void clock_correction( int8_t val ){    // time keeping only, change the fudge f
 }
 
 void temp_correction( ){    // short term drift correction with a linear map
-uint64_t local_drift;       // corrects for drift due to day/night temperature changes
+uint32_t local_drift;       // corrects for drift due to day/night temperature changes
 
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
 
-    local_drift = map( cal_result, 2999900, 3000000, 2000, 0 );
-
+    local_drift = map( cal_result, 2999900, 3000000, 20, 0 );
+    
     if( local_drift != drift ){
        drift = local_drift;
        si_pll_x(PLLB,cal_freq,cal_divider,0);
@@ -635,9 +643,11 @@ uint64_t local_drift;       // corrects for drift due to day/night temperature c
 
 
 // correct errors on bits that do not change often
-// this version moves the counters up to a hard limit and moves down on different bit decoded
-//  decodes from trends only for 1 missed bit
+//  this version moves the counters up to a hard limit and moves down on different bit decoded
 // slips in time on weak signal as is called from frame_sync
+// this version does not use bit_errors but instead requires trends to be at the limit in order to decode
+//    less decodes, less false decodes
+//    bump the trends type for each minute to be what is expected
 char wwvb_trends( char val, uint8_t dat ){
 static int i = 60;
 static int unslip;
@@ -704,17 +714,17 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
        // if( decodes == 0 && ( count >= LIMIT/2 || trend_t == SYNC || i == 8 ) ) part_decode(i);
        
        // return history on errors with only 1 bit incorrect
-       if( new_t == ERR && count == LIMIT ){
-          if( trend_t == ZEROS ){
-              if( bit_errors(dat,0xfc,i) < 2 ) val = 'o';
-          }
-          if( trend_t == ONES ){
-              if( bit_errors(dat,0xf0,i) < 2 ) val = 'i';
-          }
-          if( trend_t == SYNC ){
-              if( bit_errors(dat,0xc0,i) < 2 ) val = 's';
-          }          
-       } 
+      // if( new_t == ERR && count == LIMIT ){
+      //    if( trend_t == ZEROS ){
+      //        if( bit_errors(dat,0xfc,i) < 2 ) val = 'o';
+      //    }
+      //    if( trend_t == ONES ){
+      //        if( bit_errors(dat,0xf0,i) < 2 ) val = 'i';
+      //    }
+      //    if( trend_t == SYNC ){
+      //        if( bit_errors(dat,0xc0,i) < 2 ) val = 's';
+      //    }          
+      // } 
 
       
        if( i == 0 && val == '.' ) val = 'Z';   //  view index on no decode no history   
@@ -735,6 +745,7 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
 }
 
 
+/*
 // return the number of bits different between mask and value
 int bit_errors( uint8_t val, uint8_t mask, int i ){
 int count;
@@ -763,7 +774,7 @@ uint8_t b;
    return count;
 
 }
-
+*/
 
 /*
 // correct errors on bits that do not change often
@@ -1013,7 +1024,7 @@ static unsigned int one_second;
    }
 
    // set the frequency
-   si_pll_x(PLLA,Rdiv*4*(freq+audio_freq),divider,Rdiv*4*146*wspr_msg[i]);
+   si_pll_x(PLLA,Rdiv*4*(freq+audio_freq),divider,Rdiv*4*wspr_msg[i]);
    if( i == 0 ) tx_on();
    ++i; 
 }
@@ -1051,31 +1062,39 @@ void i2cd( unsigned char addr, unsigned char reg, unsigned char dat ){
 /******   SI5351  functions   ******/
 
 void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t fraction ){
- uint64_t a,b,c;
- uint64_t bc128;             // floor 128 * b/c term of equations
- uint64_t pll_freq;
- uint64_t cl_freq;
+ uint32_t a,b,c;
+ uint32_t bc128;             // floor 128 * b/c term of equations
+ uint32_t pll_freq;
+ uint32_t cl_freq;
 
  uint32_t P1;            // PLL config register P1
  uint32_t P2;            // PLL config register P2
  uint32_t P3;            // PLL config register P3
- uint64_t r;
-
+ uint32_t r;
+ uint32_t f;             // fudge freq and fraction if remainder is near max ( c )
+ 
    cl_freq = clock_freq;
    
    //if( pll == PLLA ) cl_freq += drift;               // drift not applied to 3 mhz calibrate freq
    cl_freq += drift;                                 // drift applied to 3 mhz.  Pick one of these.
    
-   c = 1000000;     // max 1048575
-   pll_freq = 100ULL * (uint64_t)freq + fraction;    // allow fractional frequency for wspr
-   pll_freq = pll_freq * out_divider;
+   if( pll == PLLB ) c = 1000000;     // max 1048575, cal freq pll
+   else{
+      c = (float)(cl_freq) / ( 1.46 * (float)(out_divider));
+      while( c > 1048575 ) c /= 2, fraction /= 2;            // !!! fraction /2 or *2 ?
+   }
+   // pll_freq = 100ULL * (uint32_t)freq + fraction;
+   pll_freq = freq * out_divider;
    a = pll_freq / cl_freq ;
    r = pll_freq - a * cl_freq ;
-   b = ( c * r ) / cl_freq;
+   b = ( (uint64_t)c * (uint64_t)r ) / (uint64_t)cl_freq;
+   f = Rdiv*4*3 + 1;
+   if( b + f >= c ) b -= f;          // fudge b if go over max b value on wspr steps, tx off desired freq by 5 hz
    bc128 =  (128 * r)/ cl_freq;
+   b += fraction;                    // wspr offset
    P1 = 128 * a + bc128 - 512;
    P2 = 128 * b - c * bc128;
-   if( P2 > c ) P2 = 0;        // avoid negative numbers 
+   //if( P2 > c ) P2 = 0;        // avoid negative numbers 
    P3 = c;
 
    i2cd(SI5351, pll + 0, (P3 & 0x0000FF00) >> 8);
@@ -1678,7 +1697,7 @@ static uint8_t err, vp, earl, lt;
        case 4:              
           Serial.print("  FF "); Serial.print(FF);  
           Serial.write(' ');  Serial.print(ff);
-          Serial.print("  Drift ");   Serial.print((int)drift/100);
+          Serial.print("  Drift ");   Serial.print((int)drift);
           ++dbug_print_state;
           break;
        case 5:   
