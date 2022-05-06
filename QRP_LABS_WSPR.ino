@@ -61,7 +61,7 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   27004498L   // ( 446600 ) 
+#define START_CLOCK_FREQ   27004466L   // ( 4498, 4466 ) 
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
@@ -167,8 +167,9 @@ uint8_t frame_sec;    // frame timer counts 0 to 120
 int frame_msec;
 // uint8_t tick;         // start each minute,  what was this for ? to match displayed time with computer time
                          // but disturbs the trending bit display
-
-int FF = 5;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
+                         
+                   // very long term time correction
+int FF = 3;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
 int ff = 0;        // fractional part of the fudge factor ( floats not useful as limited in significant figures )
 
 uint8_t dbug_print_state;   // print messages at 1200 baud without blocking
@@ -1075,8 +1076,8 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
  
    cl_freq = clock_freq;
    
-   //if( pll == PLLA ) cl_freq += drift;               // drift not applied to 3 mhz calibrate freq
-   cl_freq += drift;                                 // drift applied to 3 mhz.  Pick one of these.
+   if( pll == PLLA ) cl_freq += drift;               // drift not applied to 3 mhz calibrate freq
+   //cl_freq += drift;                                 // drift applied to 3 mhz.  Pick one of these.
    
    if( pll == PLLB ) c = 1000000;     // max 1048575, cal freq pll
    else{
@@ -1566,8 +1567,8 @@ static int8_t vali, valc;
         // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
         b = 0;  s = 0;  e = 1;   // assume it is an error
         
-        // strict decode works well, added some loose decode for common bit errors
-        if( wwvb_tmp == 0xfc /*|| wwvb_tmp == 0xfd || wwvb_tmp == 0xfe*/ ) e = 0, b = 0;
+        // strict decode works well, use loose decode for common bit errors ?
+        if( wwvb_tmp == 0xfc || wwvb_tmp == 0xfd  /*|| wwvb_tmp == 0xfe*/ ) e = 0, b = 0;
         if( wwvb_tmp == 0xf0 /*|| wwvb_tmp == 0xf1*/ ) e = 0, b = 1;
         if( wwvb_tmp == 0xc0 /*|| wwvb_tmp == 0xc1*/ ) e = 0, s = 1;
 
@@ -1583,10 +1584,10 @@ static int8_t vali, valc;
         if( debug_i == 12 ) debug_print( wwvb_tmp, 80 );
 
         // decode from trends
-        if( ch == 'o' ) b = 0, e = 0;
-        if( ch == 's' ) s = 1, e = 0;
-        if( ch == 'i' ) b = 1, e = 0;
-        if( ch == 'x' ) e = 1;               // flag as error if decoded different from the past history
+        //if( ch == 'o' ) b = 0, e = 0;
+        //if( ch == 's' ) s = 1, e = 0;
+        //if( ch == 'i' ) b = 1, e = 0;
+        //if( ch == 'x' ) e = 1;               // flag as error if decoded different from the past history
 
         if( e ) ++errors;
         
