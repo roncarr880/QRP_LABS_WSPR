@@ -61,7 +61,7 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   27004466L   // ( 4498, 4466 ) 
+#define START_CLOCK_FREQ   27004450L   // ( 4498, 4466 ) 
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
@@ -169,7 +169,7 @@ int frame_msec;
                          // but disturbs the trending bit display
                          
                    // very long term time correction
-int FF = 3;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
+int FF = 0;        // fixed part of fudge factor for frequency counter result ( counting 3 mhz signal )
 int ff = 0;        // fractional part of the fudge factor ( floats not useful as limited in significant figures )
 
 uint8_t dbug_print_state;   // print messages at 1200 baud without blocking
@@ -514,7 +514,7 @@ uint8_t i;
          else{                                              // way off, reset to the correct time
             frame_sec = 60;
             frame_msec = 0;  
-            FF = 3, ff = 0;             // reset timing fudge factor
+            FF = 0, ff = 0;             // reset timing fudge factor
             clr_trends = 1;             // the trend buckets will be incorrect now
          }
   }
@@ -633,7 +633,7 @@ uint32_t local_drift;       // corrects for drift due to day/night temperature c
 
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
 
-    local_drift = map( cal_result, 2999900, 3000000, 20, 0 );
+    local_drift = map( cal_result, 2999900, 3000000, 30, 0 );   // 20
     
     if( local_drift != drift ){
        drift = local_drift;
@@ -1076,8 +1076,8 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
  
    cl_freq = clock_freq;
    
-   if( pll == PLLA ) cl_freq += drift;               // drift not applied to 3 mhz calibrate freq
-   //cl_freq += drift;                                 // drift applied to 3 mhz.  Pick one of these.
+   //if( pll == PLLA ) cl_freq += drift;               // drift not applied to 3 mhz calibrate freq
+   cl_freq += drift;                                 // drift applied to 3 mhz.  Pick one of these.
    
    if( pll == PLLB ) c = 1000000;     // max 1048575, cal freq pll
    else{
