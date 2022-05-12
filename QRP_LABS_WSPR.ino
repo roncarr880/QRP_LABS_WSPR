@@ -739,7 +739,7 @@ static int s_count;     // counts from last sync - detect when spaced 9 apart. M
        if( i%10 == 9 ) Serial.write(' ');
     }
 
-    debug_i = i;
+    //debug_i = i;
 
     return val;
   
@@ -1580,8 +1580,14 @@ static int8_t vali, valc;
         else if( b == 1 ) ch = '1';
         ch = wwvb_trends(ch , wwvb_tmp);
 
-        debug_print( wwvb_tmp, 20 );
-        if( debug_i == 12 ) debug_print( wwvb_tmp, 80 );
+        if( e == 0 ) debug_print( wwvb_tmp, 20 );
+        //debug_i <<= 1;
+        //if( e ) debug_i |= 1;
+        //if( (secs & 7) == 0 ){                // modulus 8 without divide
+        //   debug_print( debug_i, 80 );
+        //   debug_i = 0;
+        //}
+        if( e ) debug_print( wwvb_tmp, 80 );    // display data for last error
 
         // decode from trends
         //if( ch == 'o' ) b = 0, e = 0;
