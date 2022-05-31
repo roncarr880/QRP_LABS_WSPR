@@ -61,7 +61,7 @@
 #define CAT_MODE  0     // computer control of TX
 #define FRAME_MODE 1    // self timed frame (stand alone mode)
 #define MUTE  A1        // receiver module T/R switch pin
-#define START_CLOCK_FREQ   27004450L   // ( 4498, 4466 ) 
+#define START_CLOCK_FREQ   27004456L   // ( 4498, 4466 ) 
 //#define START_CLOCK_FREQ   2700466600   // test too high
 //#define START_CLOCK_FREQ   2700426600   // test too low
 
@@ -633,7 +633,7 @@ uint32_t local_drift;       // corrects for drift due to day/night temperature c
 
     if( wspr_tx_enable ) return;                                // ignore this when transmitting
 
-    local_drift = map( cal_result, 2999900, 3000000, 30, 0 );   // 20
+    local_drift = map( cal_result, 2999900, 3000000, 20, 0 );   // 20
     
     if( local_drift != drift ){
        drift = local_drift;
