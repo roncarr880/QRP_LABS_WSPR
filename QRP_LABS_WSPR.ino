@@ -106,20 +106,21 @@ long tm_correct_count = 60000;       // add or sub one ms for time correction pe
 int8_t tm_correction = 0;            // 0, 1 or -1 time correction
 int8_t tm_correction2;               // frame sync to wwvb signal falling edge
 
-//      Download WSPRcode.exe from  http://physics.princeton.edu/pulsar/K1JT/WSPRcode.exe   and run it in a dos window 
+//      Download WSPRcode.exe from  http://physics.princeton.edu/pulsar/K1JT/WSPRcode.exe   and run it in a dos window
+//          Bad link now - K1JT has moved to SourceForge 
 //      Type (for example):   WSPRcode "K1ABC FN33 37"    37 is 5 watts, 30 is 1 watt, 33 is 2 watts, 27 is 1/2 watt
 //      ( Use capital letters in your call and locator when typing in the message string.  No extra spaces )
 //      Using the editing features of the dos window, mark and copy the last group of numbers
 //      Paste into notepad and replace all 3 with "3,"  all 2 with "2," all 1 with "1," all 0 with "0,"
 //      Remove the comma on the end
-//  the current message is   "K1URC FN54 23"
+//  the current message is   "KE1MU FN54 23"
 const char wspr_msg[] = { 
- 3, 3, 2, 2, 2, 0, 0, 2, 1, 2, 0, 2, 1, 1, 1, 2, 2, 2, 3, 0, 0, 1, 0, 1, 1, 3, 3, 2, 2, 0,
- 2, 2, 0, 0, 3, 2, 0, 3, 0, 1, 2, 0, 2, 0, 0, 2, 3, 0, 1, 3, 2, 0, 1, 1, 2, 1, 0, 2, 0, 3,
- 3, 2, 3, 2, 2, 2, 2, 1, 3, 2, 3, 0, 3, 0, 3, 0, 3, 2, 0, 3, 2, 0, 3, 0, 3, 1, 0, 2, 0, 1,
- 1, 2, 1, 2, 3, 0, 2, 2, 3, 2, 2, 0, 2, 2, 1, 0, 2, 1, 2, 0, 3, 3, 1, 2, 3, 1, 2, 2, 3, 1,
- 2, 1, 2, 0, 0, 1, 1, 3, 2, 2, 2, 2, 0, 1, 0, 1, 2, 0, 3, 1, 0, 2, 0, 0, 2, 2, 0, 1, 3, 0,
- 1, 2, 3, 1, 0, 2, 2, 1, 3, 0, 2, 2
+      3, 1, 2, 2, 0, 2, 2, 2, 3, 2, 2, 2, 1, 1, 3, 2, 0, 0, 3, 0, 0, 1, 0, 1, 3, 3, 1, 2, 0, 2,
+      0, 2, 2, 2, 3, 2, 0, 1, 0, 1, 2, 2, 0, 0, 0, 0, 3, 0, 3, 1, 2, 0, 3, 1, 0, 1, 2, 0, 2, 3,
+      1, 2, 3, 2, 0, 0, 0, 1, 1, 2, 1, 0, 1, 2, 3, 0, 1, 0, 2, 3, 0, 0, 3, 0, 3, 1, 0, 2, 0, 3,
+      3, 2, 3, 2, 1, 0, 2, 2, 1, 2, 0, 0, 0, 2, 3, 2, 2, 1, 0, 2, 1, 3, 1, 0, 1, 1, 0, 0, 3, 1,
+      2, 3, 2, 0, 0, 1, 1, 3, 2, 2, 0, 2, 2, 3, 0, 1, 2, 0, 3, 1, 2, 2, 0, 0, 0, 2, 2, 1, 1, 0,
+      3, 2, 1, 1, 0, 2, 2, 1, 3, 0, 0, 2 
  };
 
 
@@ -1081,6 +1082,7 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
    
    if( pll == PLLB ) c = 1000000;     // max 1048575, cal freq pll
    else{
+      // set c such that each 4 steps of fraction changes freq by 1.46 hz ( R divisor of 4 in use )
       c = (float)(cl_freq) / ( 1.46 * (float)(out_divider));
       while( c > 1048575 ) c /= 2, fraction /= 2;            // !!! fraction /2 or *2 ?
    }
@@ -1089,7 +1091,8 @@ void  si_pll_x(unsigned char pll, uint32_t freq, uint32_t out_divider, uint32_t 
    a = pll_freq / cl_freq ;
    r = pll_freq - a * cl_freq ;
    b = ( (uint64_t)c * (uint64_t)r ) / (uint64_t)cl_freq;
-   f = Rdiv*4*3 + 1;
+   f = Rdiv*4*3 + 1;                 // max wspr deviation, R is 4 and Rdiv is further R divider for low freq
+                                     // probably should skip this for PLLB
    if( b + f >= c ) b -= f;          // fudge b if go over max b value on wspr steps, tx off desired freq by 5 hz
    bc128 =  (128 * r)/ cl_freq;
    b += fraction;                    // wspr offset
