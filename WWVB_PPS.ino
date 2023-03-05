@@ -13,13 +13,8 @@ extern uint8_t BigNumbers[];
 
 #define WWVB_IN 7
 #define PPS_OUT 8
+#define CORR_SIZE 256        // power of two buffer,
 
- // if the nano 16mhz clock can be compensated for when the wwvb signal is absent such that we gain or loose less than
- // 1/2 second then this ( the whole program algorithms )  should work ok.
-//long tm_correct_count = 119000;       // add or sub one ms for time correction per this many ms
-long tm_correct_count = 30000;         // set up as if the 16mhz xtal is actually faster than that
-int8_t tm_correction = -1;             // 1 or -1 time correction
-long time_adjust;
 int gmon = 1,gday = 1,gyr = 1,ghr,gmin;
 int tot_days = 1;
 uint16_t leap = 1;
@@ -27,11 +22,17 @@ uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 uint8_t DST;                         // daylight savings bit
 uint8_t gsec;
 uint8_t msg_que;
-int phase;                           // where wwvb falling occurs in our current second
-int tot_phase;                       // total corrections applied via sync up
+//int phase;                           // where wwvb falling occurs in our current second
+//int tot_phase;                       // total corrections applied via sync up
+int8_t corrections[CORR_SIZE];               // 4 hours of time correction history
+int cindex;
+float rtotal;
+float bucket;
+int enable_dither;               // enabled when think have a good wwvb signal
+
 
 void setup() {
-  
+int i;  
   pinMode(WWVB_IN, INPUT_PULLUP);     // sample wwvb receiver signal
   pinMode(PPS_OUT, OUTPUT);
   Serial.begin(9600);
@@ -40,7 +41,7 @@ void setup() {
   LCD.print("WWVB PPS TEST",CENTER,8*0);
   delay( 5000 );
   LCD.clrRow(0);
-  
+
 }
 
 void loop() {
@@ -53,10 +54,10 @@ static unsigned long tm;
 
   if( gsec == msg_que ){
      switch( msg_que ){
-       case 0:  send_gga();  ++msg_que;  break;
-       case 1:  send_gsv();  ++msg_que;  break;
-       case 2:  send_gsa();  ++msg_que;  break;
-       case 3:  send_rmc();  msg_que = 0; break;
+       case 1:  send_gga();  ++msg_que;  break;
+       case 2:  send_gsv();  ++msg_que;  break;
+       case 3:  send_gsa();  ++msg_que;  break;
+       case 4:  send_rmc();  msg_que = 1; break;
      }
   }
 
@@ -169,8 +170,8 @@ static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
 const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
 static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
-static int enable_dither;               // enabled when think have a good wwvb signal
 char ch[2];
+static int adjusts;
 
    loops = t - old_t;
    old_t = t;
@@ -179,10 +180,23 @@ char ch[2];
   while( loops-- ){   // repeat for any missed milliseconds
 
     // adjust for 16mhz millis() error
-    if( ++time_adjust >= tm_correct_count && wwvb_clk > 2 ){
-        time_adjust = 0;
-        wwvb_clk += tm_correction;
-    }
+//    if( ++time_adjust >= tm_correct_count && wwvb_clk > 2 ){
+//        time_adjust = 0;
+//        wwvb_clk += tm_correction;
+//    }
+
+   if( wwvb_clk > 100 ){            // apply  historic time corrections
+      if( bucket > 1.0 ){
+         ++wwvb_clk;
+         ++adjusts;               // positive feedback?
+         bucket -= 1.0;
+      }
+      if( bucket < -1.0 ){
+         --wwvb_clk;
+         --adjusts;
+         bucket += 1.0;
+      }
+   }
 
    if( digitalRead(WWVB_IN) == LOW ) ++wwvb_sum;
 
@@ -214,18 +228,20 @@ char ch[2];
             ++late;                                // sampling late
             if( enable_dither > 0 ){
                wwvb_clk -= dither;                 // adjust sample to earlier
-               phase -= dither;
-               tot_phase -= dither;
-               if( phase < -700 ) phase += 1000;
+               adjusts -= dither;
+            //   phase -= dither;
+            //   tot_phase -= dither;
+            //   if( phase < -700 ) phase += 1000;
             }
          }
          else{
             ++early;                               // need to sample later
-            if( enable_dither > 0 ){
+            if( enable_dither > 0 ){     
                wwvb_clk +=  dither;                   // longer clock
-               phase += dither;
-               tot_phase += dither;
-               if( phase > 700 ) phase -= 1000;        // may have lost second if due to slip
+               adjusts +=   dither;
+            //   phase += dither;
+            //   tot_phase += dither;
+            //   if( phase > 700 ) phase -= 1000;        // may have lost second if due to slip
             }
             
          }
@@ -263,7 +279,7 @@ char ch[2];
           if( wwvb_errors == 0 ){    // decode if no bit errors
              wwvb_decode();
              secs = 59;              // secs = 0 next statement
-             phase = 0;
+          //   phase = 0;
           }
         }
 
@@ -277,25 +293,26 @@ char ch[2];
         if( ++secs >= 60 ){  //  adjust dither each minute
            dither = ( errors >> 4 ) + 1;
 
-           // will this work for both slow and fast 16 mhz clock?
-           // adjust correction for the 16 mhz nano clock
-           if( errors < 45 ){
-              tm_correct_count += tm_correction * (late - early);  // ? which is correct ?
-              //tm_correct_count += tm_correction * (early - late);
-              if( tm_correct_count > 120000 ){
-                 tm_correct_count = 119000;
-                 tm_correction *= -1;
-              }
+           // add adjusts to running total and add average to the adjust bucket
+           // Serial.print( adjusts );  Serial.write(' ');  Serial.println(rtotal/(float)CORR_SIZE);
+           if( errors < 30 ){
+              rtotal -= corrections[cindex];
+              rtotal += adjusts;
+              corrections[cindex++] = adjusts;
+              cindex &= (CORR_SIZE - 1 );
            }
-
+           bucket += rtotal / (float)CORR_SIZE;     // keep applying the average time correction
+           adjusts = 0;
+           
            //Serial.print( errors );  Serial.write(' ');
            //Serial.print( tm_correction); Serial.write(' ');
            //Serial.println( tm_correct_count );
-           LCD.printNumI( tm_correct_count,LEFT,1*8,6,' ');
-           LCD.printNumI( tm_correction,8*6,1*8,2,' ');
-           LCD.printNumI(errors,RIGHT,1*8,2,' ');
-           LCD.printNumI( tot_phase,RIGHT,4*8,6,' ');
+         //  LCD.printNumI( tm_correct_count,LEFT,1*8,6,' ');
+         //  LCD.printNumI( tm_correction,8*6,1*8,2,' ');
+         //  LCD.printNumI( tot_phase,RIGHT,4*8,6,' ');
           // LCD.printNumI( phase,LEFT,4*8,4,' ');
+           LCD.printNumI(errors,RIGHT,1*8,2,' ');
+           LCD.printNumF( rtotal/(float)CORR_SIZE,2, RIGHT, 4*8,'.',6,' ');
 
            early = late = secs = errors = 0;   // reset the stats for the next minute
            if( enable_dither < -60 ) enable_dither = -60;
@@ -318,7 +335,11 @@ int   count_zeros( uint8_t val ){
 int i;
 uint8_t c;
 static int last_i;
+int rval;
+uint8_t sval;
 
+     sval = val;      // save for backup instead of fall through algorithm
+     
      // rotate data until have xxxxxx01
     for( i = 0; i < 8; ++i ){
        c = 0;
@@ -327,14 +348,18 @@ static int last_i;
        val <<= 1;  val |= c;
     }
 
+    rval = 0;
+
     if( last_i != i ){              // check for constant rotation
        last_i = i;
-       return -1;
+       rval = -1;
     }
-    if( val == 0b10000001 || val == 0b11100001 || val == 0b11111001 ) return 3;
-    if( val == 0b11000001 || val == 0b11110001 ) return 2;
-    if( val == 0b11111101 ) return 1;
-    return -1;
+    else if( val == 0b10000001 || val == 0b11100001 || val == 0b11111001 ) rval = 3;
+    else if( val == 0b11000001 || val == 0b11110001 ) rval = 2;
+    else if( val == 0b11111101 ) rval = 1;
+    else rval = -1;
+
+    return rval;
 }
 
 /***
