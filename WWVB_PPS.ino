@@ -1,7 +1,7 @@
 
 /*
  *   WWVB experiments
- *   
+ *       WWVB as fake gps for U3S, how much will pps cause the tx frequency to be incorrect
  */
 
 #include <LCD5110_Basic.h>
@@ -22,13 +22,19 @@ uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 uint8_t DST;                         // daylight savings bit
 uint8_t gsec;
 uint8_t msg_que = 1;
-int enable_dither;               // enabled when think have a good wwvb signal
 unsigned long old_t;
-int8_t reverse = 1;              // when -1 runs sync up in reverse
 
-long time_adjust;
-long tm_correct_count = 20000;
-int8_t tm_correction = 1;
+long time_adjust;                  // counter
+long tm_correct_count = 30000;     // adjust one ms in this many ms
+int8_t tm_correction = 1;          // +1 fast,  -1 slow
+
+#define NUM_HISTORY 32
+int phase;                         // lost second detection
+// int tot_phase;                  // normal on time NANO, my NANO seems to run very fast
+int tot_phase = 32*9;
+//int phase_history[NUM_HISTORY];  // normal on time NANO
+int phase_history[NUM_HISTORY] = { 9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};  // testing
+float rtotal;
 
 void setup() {
 int i;  
@@ -46,19 +52,37 @@ int i;
 
 void loop() {
 static unsigned long tm;
+static uint8_t msg;
 
   if( tm != millis() ){
      tm = millis();
      wwvb_sample2(tm);
   }
 
-  if( gsec == msg_que ){
-     switch( msg_que ){
-       case 1:  send_gga();  ++msg_que;  break;
-       case 2:  send_gsv();  ++msg_que;  break;
-       case 3:  send_gsa();  ++msg_que;  break;
-       case 4:  send_rmc();  msg_que = 1; break;
+/*
+  if( gsec == msg_que ){                  // sending one message per second to avoid overfilling the serial buffer
+     switch( msg_que & 7 ){               // still some of these messages are larger than 64 characters
+       case 1:  send_gga();  break;       // avoiding sending on second zero as there are a large amount of screen writes
+       case 2:  send_gsv();  break;
+       case 3:  send_gsa();  break;
+       case 4:  send_rmc();  break;
+       // case 5 6 7 available
      }
+     if( ++msg_que >= 60 ) msg_que = 0;
+  }
+  */
+  if( gsec == msg_que && Serial.availableForWrite() > 60 ){      // send all each second
+     switch( msg ){
+       case 0:  send_gga(); ++msg;  break;     // order sent must be just so, alphabetical I guess
+       case 2:  send_gsv(); ++msg;  break;
+       case 1:  send_gsa(); ++msg;  break;
+       case 3:  send_rmc(); ++msg;  break;
+       case 4:  ++msg_que;  
+                if( msg_que >= 60 ) msg_que = 0;
+                msg = 0;
+                break;
+     }
+    
   }
 
 }
@@ -81,7 +105,7 @@ void send_gga(){
 void send_gsv(){
 
   gps_puts( "$GPGSV," );
-  gps_puts( "1,1,4," );              // messages, sats in view
+  gps_puts( "1,1,04," );              // messages, sats in view
   gps_puts( "04,44,104,24," );       // prn,elevation,azimuth,snr
   gps_puts( "05,45,105,25," );       // prn,elevation,azimuth,snr
   gps_puts( "06,46,106,26," );       // prn,elevation,azimuth,snr
@@ -93,20 +117,21 @@ void send_gsa(){
   gps_puts( "$GPGSA," );
   gps_puts( "A,3," );                // 3d fix
   gps_puts( "04,05,06,07," );        // ID's
-  gps_puts( ",,,,,,,,,," );          // unused slots
-  gps_puts( "1.7,1.0,1.3*" );        // pdop,hdop,vdop
+  gps_puts( ",,,,,,,," );          // unused slots
+  gps_puts( "1.7,1.1,1.3*" );        // pdop,hdop,vdop
 }
 
 void send_rmc(){
 
   gps_puts( "$GPRMC," );
   send_num( ghr ); send_num( gmin ); send_num( gsec );
-  gps_puts( ",A," );
+   gps_puts( ".20," );
+  gps_puts( "A," );
   gps_puts( "4426.8053,N,");        // lat
   gps_puts( "06931.4612,W,");       // long
   gps_puts( "000.5,054.7,");        // speed,course
   send_num( gday );  send_num(gmon);  send_num( gyr );   // date
-  gps_puts( ",018.1,W*" );          // mag declination
+  gps_puts( ",018.1,W,A*" );          // mag declination, A or D?
 }
 
 void send_num( int val ){
@@ -182,7 +207,6 @@ const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000
 static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch[2];
-static int adjusts;
 
    loops = t - old_t;
    old_t = t;
@@ -208,40 +232,25 @@ static int adjusts;
       // 8 dumps of the integrator is one second, decode this bit
       wwvb_count++;
       wwvb_count &= 7;
-      if( wwvb_count == 0 ) digitalWrite( PPS_OUT,HIGH);
-      if( wwvb_count == 1 ) digitalWrite( PPS_OUT,LOW);
-      if( wwvb_count == 3 ) gsec = secs;                   // que serial messages
+      if( wwvb_count == 1 && rtotal < 250.0 && rtotal > -250.0) digitalWrite( PPS_OUT,HIGH);
+      if( wwvb_count == 2 ) digitalWrite( PPS_OUT,LOW), gsec = secs;     // que serial messages
+
       wwvb_clk = counts[wwvb_count];  // 100 100 150 150 150 150 100 100
                               // decode     0       1      sync    stop should be high
       if( wwvb_count == 0 ){    // decode time
 
         // clocks late or early, just dither them back and forth across the falling edge
         // when not in sync, more 1's than 0's are detected and this slips in time.
-        // attempt to prevent that by enable flag
         
       if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
 
-         enable_dither += count_zeros( wwvb_tmp );
          if( digitalRead(WWVB_IN) == 0 ){  
             ++late;                                // sampling late
-            if( enable_dither > 0 ){
-               wwvb_clk -= dither;                 // adjust sample to earlier
-               adjusts -= dither;
-            //   phase -= dither;
-            //   tot_phase -= dither;
-            //   if( phase < -700 ) phase += 1000;
-            }
+            wwvb_clk -= dither;                 // adjust sample to earlier
          }
          else{
-            ++early;                               // need to sample later
-            if( enable_dither > 0 ){     
-               wwvb_clk +=  reverse*dither;                   // longer clock
-               adjusts +=   reverse*dither;
-            //   phase += dither;
-            //   tot_phase += dither;
-            //   if( phase > 700 ) phase -= 1000;        // may have lost second if due to slip
-            }
-            
+            ++early;                               // need to sample later     
+            wwvb_clk +=  dither;                   // longer clock            
          }
       }
       
@@ -277,7 +286,6 @@ static int adjusts;
           if( wwvb_errors == 0 ){    // decode if no bit errors
              wwvb_decode();
              secs = 59;              // secs = 0 next statement
-          //   phase = 0;
           }
         }
 
@@ -286,37 +294,36 @@ static int adjusts;
         LCD.setFont(MediumNumbers);
         LCD.printNumI(secs,RIGHT,2*8,2,'0');
         LCD.setFont(SmallFont);
-        LCD.printNumI( enable_dither,LEFT,4*8,4,' ');
         
         if( ++secs >= 60 ){  //  adjust dither each minute
            dither = ( errors >> 4 ) + 1;
-           
+
+           phase = early-late;
+
            if( errors < 40 ){
            // will this work for both slow and fast 16 mhz clock?
            // adjust correction for the 16 mhz nano clock
               tm_correct_count += tm_correction * (late - early);  // ? which is correct ?
               //tm_correct_count += tm_correction * (early - late);
-              if( tm_correct_count > 200000 ){
-                 tm_correct_count = 199000;
+              if( tm_correct_count > 60000 ){
+                 tm_correct_count =  59000;
                  tm_correction *= -1;
               }
            }
-
-           adjusts = 0;
            
            //Serial.print( errors );  Serial.write(' ');
            //Serial.print( tm_correction); Serial.write(' ');
            //Serial.println( tm_correct_count );
            LCD.printNumI( tm_correct_count,LEFT,1*8,6,' ');
            LCD.printNumI( tm_correction,8*6,1*8,2,' ');
-         //  LCD.printNumI( tot_phase,RIGHT,4*8,6,' ');
-          // LCD.printNumI( phase,LEFT,4*8,4,' ');
            LCD.printNumI(errors,RIGHT,1*8,2,' ');
-          // LCD.printNumF( rtotal/(float)CORR_SIZE,2, RIGHT, 4*8,'.',6,' ');
-
-           early = late = secs = errors = 0;   // reset the stats for the next minute
-           if( enable_dither < -60 ) enable_dither = -60;
-           if( enable_dither > 0 ) enable_dither = 0;
+           
+           early = late = secs  = 0;   // reset the stats for the next minute
+           secs += save_phase_hist(phase,errors);
+           errors = 0;
+           LCD.printNumF( (float)tot_phase/(float)NUM_HISTORY,2,RIGHT,4*8,'.',6,' ' );
+           LCD.printNumI( (int)rtotal,LEFT,4*8,5,' ' );
+           phase = 0;       
            if( wwvb_errors > 0 ) keep_time();
         }
 
@@ -326,72 +333,31 @@ static int adjusts;
 }
 
 
-
-// did we receive a 1 or sync out of phase?   Count zero's in a row. OR Check for valid data.
-//  11100001    00111100  11110000
-
-// check for valid data
-int   count_zeros( uint8_t val ){
+// save correction history, adjust seconds if think lost one
+int8_t save_phase_hist(int phase, int errors){
 int i;
-uint8_t c;
-static int last_i;
-int rval;
 
+   if( errors < 45 ){                           // assume in phase if receiving some good data, save expected data
+      tot_phase = phase;
+      for( i = 0; i < NUM_HISTORY-1; ++i ){
+         phase_history[i] = phase_history[i+1];
+         tot_phase += phase_history[i];
+      }
+      phase_history[NUM_HISTORY-1] = phase;
+      rtotal = 0.0;
+   }
+   else{
+      rtotal -= (float)tot_phase / (float)NUM_HISTORY;       // sub expected
+      rtotal += phase;                         // add new
+      if( rtotal > 1000.0 ){
+        rtotal -= 1000.0;
+        return 1;                              // lost a second?
+      }
+   }
 
-     // 00111111  00111100 00110000   10011111  00011110 00011000
-     reverse = ( val == 0b00111111 || val == 0b10011111 ) ? -1 : 1;
-     
-     // rotate data until have xxxxxx01
-    for( i = 0; i < 8; ++i ){
-       c = 0;
-       if( val & 0x80 ) c = 1;
-       if( (val & 3) == 1 ) break;
-       val <<= 1;  val |= c;
-    }
-
-    rval = 0;
-
-    if( last_i != i ){              // check for constant rotation
-       last_i = i;
-       rval = -1;
-    }
-    else if( val == 0b10000001 || val == 0b11100001 || val == 0b11111001 ) rval = 2;
-    else if( val == 0b11000001 || val == 0b11110001 ) rval = 1;
-    else if( val == 0b11111101 ) rval = 0;
-    else rval = -1;
-
-    return rval;
+   return 0;
 }
 
-/***
-uint8_t  count_zeros( uint8_t val ){
-uint8_t c1, c2;
-int i;
-    c1 = 0;  c2 = 0;
-
-    if( ( val & _BV(0) ) == 1 ){       // easy case
-       for( i = 0; i < 8; ++i ){
-          if( (val & _BV(i)) == 0 ) ++c1;
-          if( c1 && ( val & _BV(i) )) break;    // found a 1 after the zero
-       }
-       if( c1 >= 4 ) return 1;
-       else return 0;
-    }
-
-    for( i = 0; i < 8; ++i ){
-       if( val & _BV(i) ) break;
-       ++c1;
-    }
-    for( i = 7; i >= 0; --i ){
-       if( val & _BV(i) ) break;
-       ++c2;
-    }
-
-    if( c1 + c2  >= 4 ) return 1;
-    return 0;
-  
-}
-**/
 
 
 void wwvb_decode(){   // WWVB transmits the data for the previous minute just ended
@@ -404,33 +370,12 @@ uint16_t dy;
 uint8_t i;
 
 
-  //tmp2 = frame_sec;
-  //tmp = frame_msec;         // capture milliseconds value before it is corrected so we can print it.
-
-  //++decodes;
-
   yr = wwvb_decode2( 53, 0x1ff );   // year is 0 to 99
   dy = wwvb_decode2( 33, 0xfff );   // day is 0 to 365/366
   hr = wwvb_decode2( 18, 0x7f );
   mn = wwvb_decode2( 8, 0xff );
   leap = wwvb_decode2( 55, 0x1 );
-  DST  = wwvb_decode2( 57, 0x1 );    // in effect bit ( using bit 58 gave wrong time for one day )
-
-/***
-  if( ( mn & 1 ) == 0 ){    //last minute was even so just hit the 60 second mark in the frame
-                            // only apply clock corrections in the middle of the two minute frame or may
-                            // otherwise mess up the frame timing
-         if( frame_sec == 59 && frame_msec >= 500 ) ;   // ok
-         else if( frame_sec == 60 && frame_msec < 500 ) ;  // ok
-         else{                                              // way off, reset to the correct time
-            frame_sec = 60;
-            frame_msec = 0;  
-           // FF = 0, ff = 0;             // reset timing fudge factor
-           // clr_trends = 1;             // the trend buckets will be incorrect now
-         }
-  }
-  ****/
-  
+  DST  = wwvb_decode2( 57, 0x1 );    // in effect bit ( using bit 58 gave wrong time for one day )  
     
   ghr = hr;
   gmin = mn;
@@ -438,8 +383,6 @@ uint8_t i;
   tot_days = dy;
   calc_date();
   keep_time();            // wwvb sends minute just ended info, so increment
-  //calc_date( );
-  //time_flags |= TS;
 
 }
 
