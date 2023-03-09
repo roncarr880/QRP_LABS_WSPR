@@ -207,9 +207,11 @@ const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000
 static uint8_t secs,errors,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch[2];
+static int max_loops;       // debug, how many millis is missed ?
 
    loops = t - old_t;
    old_t = t;
+   if( loops > max_loops ) max_loops = loops;
    
   while( loops-- ){   // repeat for any missed milliseconds
 
@@ -232,8 +234,13 @@ char ch[2];
       // 8 dumps of the integrator is one second, decode this bit
       wwvb_count++;
       wwvb_count &= 7;
-      if( wwvb_count == 1 && rtotal < 250.0 && rtotal > -250.0) digitalWrite( PPS_OUT,HIGH);
-      if( wwvb_count == 2 ) digitalWrite( PPS_OUT,LOW), gsec = secs;     // que serial messages
+      if( wwvb_count == 6 ){             // send pps at end of second as U3S adds one second 
+        digitalWrite( PPS_OUT,HIGH);     // pps not accurate rising edge to falling, use 00 10 for calibrate in U3S
+      }
+      if( wwvb_count == 7 ){
+        digitalWrite( PPS_OUT,LOW);
+        gsec = secs;     // que serial messages
+      }
 
       wwvb_clk = counts[wwvb_count];  // 100 100 150 150 150 150 100 100
                               // decode     0       1      sync    stop should be high
@@ -323,6 +330,7 @@ char ch[2];
            errors = 0;
            LCD.printNumF( (float)tot_phase/(float)NUM_HISTORY,2,RIGHT,4*8,'.',6,' ' );
            LCD.printNumI( (int)rtotal,LEFT,4*8,5,' ' );
+           LCD.printNumI( max_loops, RIGHT,5*8,3,' ' );
            phase = 0;       
            if( wwvb_errors > 0 ) keep_time();
         }
@@ -430,10 +438,10 @@ void keep_time(){
    LCD.printNumI(gmin,CENTER,2*8,2,'0');
    LCD.setFont(SmallFont);
    LCD.printNumI(gmon,0,5*8,2,'0');
-   LCD.print("/",3*6,5*8);
-   LCD.printNumI(gday,5*6,5*8,2,'0');
-   LCD.print("/",8*6,5*8);
-   LCD.printNumI(gyr,10*6,5*8,2,'0');
+   LCD.print("/",2*6,5*8);
+   LCD.printNumI(gday,3*6,5*8,2,'0');
+   LCD.print("/",5*6,5*8);
+   LCD.printNumI(gyr,6*6,5*8,2,'0');
    
 
 
