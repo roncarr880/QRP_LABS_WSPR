@@ -24,17 +24,26 @@ uint8_t gsec;
 uint8_t msg_que = 1;
 unsigned long old_t;
 
+// long term time adjustment
 long time_adjust;                  // counter
-long tm_correct_count = 30000;     // adjust one ms in this many ms
+long tm_correct_count = 6000;      // adjust one ms in this many ms
 int8_t tm_correction = 1;          // +1 fast,  -1 slow
 
+// short term lost second detection( when wwvb signal is weak )
 #define NUM_HISTORY 32
-int phase;                         // lost second detection
-// int tot_phase;                  // normal on time NANO, my NANO seems to run very fast
-int tot_phase = 32*9;
-//int phase_history[NUM_HISTORY];  // normal on time NANO
-int phase_history[NUM_HISTORY] = { 9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9,9};  // testing
+int phase;
+int tot_phase;
+int phase_history[NUM_HISTORY];
 float rtotal;
+
+int psec;                            // que prints outside of the timekeeping function
+uint8_t pmin;
+uint8_t errors;
+uint8_t perrors;
+int max_loops;
+
+char stg_buf[128];                   // expand the serial buffer
+int stin, stout;
 
 void setup() {
 int i;  
@@ -51,26 +60,12 @@ int i;
 }
 
 void loop() {
-static unsigned long tm;
 static uint8_t msg;
 
-  if( tm != millis() ){
-     tm = millis();
-     wwvb_sample2(tm);
-  }
+  wwvb_sample2(millis());
 
-/*
-  if( gsec == msg_que ){                  // sending one message per second to avoid overfilling the serial buffer
-     switch( msg_que & 7 ){               // still some of these messages are larger than 64 characters
-       case 1:  send_gga();  break;       // avoiding sending on second zero as there are a large amount of screen writes
-       case 2:  send_gsv();  break;
-       case 3:  send_gsa();  break;
-       case 4:  send_rmc();  break;
-       // case 5 6 7 available
-     }
-     if( ++msg_que >= 60 ) msg_que = 0;
-  }
-  */
+  while( stin != stout && Serial.availableForWrite() > 4 ) serial_unstage();
+
   if( gsec == msg_que && Serial.availableForWrite() > 60 ){      // send all each second
      switch( msg ){
        case 0:  send_gga(); ++msg;  break;     // order sent must be just so, alphabetical I guess
@@ -83,6 +78,42 @@ static uint8_t msg;
                 break;
      }
     
+  }
+
+  if( psec != -1 ) psecs();
+  else if( pmin ){
+     switch( pmin++ ){
+       case 1: 
+           LCD.printNumI( tm_correct_count,LEFT,1*8,6,' ');
+           LCD.printNumI( tm_correction,8*6,1*8,2,' ');
+           LCD.printNumI(perrors,RIGHT,1*8,2,' ');
+       break;
+       case 2:
+           LCD.printNumF( (float)tot_phase/(float)NUM_HISTORY,2,RIGHT,4*8,'.',6,' ' );
+           LCD.printNumI( (int)rtotal,LEFT,4*8,5,' ' );
+           LCD.printNumI( max_loops, RIGHT,5*8,3,' ' );
+           --max_loops;
+       break;
+       case 3:
+           LCD.setFont(MediumNumbers);
+           LCD.printNumI(ghr,LEFT,2*8,2,'0');
+           LCD.printNumI(gmin,CENTER,2*8,2,'0');
+           LCD.setFont(SmallFont);
+       break;
+       case 4:    
+           LCD.printNumI(gmon,0,5*8,2,'0');
+           LCD.print("/",2*6,5*8);
+       break;
+       case 5:    
+           LCD.printNumI(gday,3*6,5*8,2,'0');
+           LCD.print("/",5*6,5*8);
+       break;
+       case 6:    
+           LCD.printNumI(gyr,6*6,5*8,2,'0');
+       break;    
+       
+       default:  pmin = 0;  break;
+     }
   }
 
 }
@@ -149,11 +180,12 @@ static uint8_t  crc;
    if( c == '$' ) crc = 0;
    else if( c != '*' ) crc ^= c;
    
-   Serial.write( c );
+   serial_stage( c );
    if( c == '*' ){
       send_hex( crc );
-      Serial.println();
+      serial_stage('\r'); serial_stage('\n');
    }
+   
 }
 
 void gps_puts( char * p ){
@@ -168,9 +200,25 @@ char buf[30];
    itoa( d, buf, 16 );
    buf[0] = toupper( buf[0] );
    buf[1] = toupper( buf[1] );
-   gps_puts( buf );
+   if( buf[1] == 0 ){
+      buf[1] = buf[0];
+      buf[0] = '0';
+   }
+   serial_stage(buf[0]);  serial_stage(buf[1]);
 }
 
+
+void serial_stage( char c ){
+
+    stg_buf[stin++] = c;
+    stin &= 127;
+}
+
+void serial_unstage(){
+
+   Serial.write( stg_buf[stout++] );
+   stout &= 127;
+}
 
 
 void calc_date(){    // from total days and leap flag
@@ -204,10 +252,10 @@ int loops;
 uint8_t b,s,e;
 static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
 const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
-static uint8_t secs,errors,early,late;
+static uint8_t secs,early,late;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
 char ch[2];
-static int max_loops;       // debug, how many millis is missed ?
+
 
    loops = t - old_t;
    old_t = t;
@@ -234,10 +282,10 @@ static int max_loops;       // debug, how many millis is missed ?
       // 8 dumps of the integrator is one second, decode this bit
       wwvb_count++;
       wwvb_count &= 7;
-      if( wwvb_count == 6 ){             // send pps at end of second as U3S adds one second 
+      if( wwvb_count == 1 ){
         digitalWrite( PPS_OUT,HIGH);     // pps not accurate rising edge to falling, use 00 10 for calibrate in U3S
       }
-      if( wwvb_count == 7 ){
+      if( wwvb_count == 2 ){
         digitalWrite( PPS_OUT,LOW);
         gsec = secs;     // que serial messages
       }
@@ -295,19 +343,13 @@ static int max_loops;       // debug, how many millis is missed ?
              secs = 59;              // secs = 0 next statement
           }
         }
-
-        //Serial.print( secs );  Serial.write(' ');
-        //if( secs == 29 || secs == 59 ) Serial.println();
-        LCD.setFont(MediumNumbers);
-        LCD.printNumI(secs,RIGHT,2*8,2,'0');
-        LCD.setFont(SmallFont);
         
         if( ++secs >= 60 ){  //  adjust dither each minute
            dither = ( errors >> 4 ) + 1;
-
+           pmin = 1;                          // que prints
            phase = early-late;
 
-           if( errors < 40 ){
+           if( errors < 30 ){
            // will this work for both slow and fast 16 mhz clock?
            // adjust correction for the 16 mhz nano clock
               tm_correct_count += tm_correction * (late - early);  // ? which is correct ?
@@ -321,31 +363,35 @@ static int max_loops;       // debug, how many millis is missed ?
            //Serial.print( errors );  Serial.write(' ');
            //Serial.print( tm_correction); Serial.write(' ');
            //Serial.println( tm_correct_count );
-           LCD.printNumI( tm_correct_count,LEFT,1*8,6,' ');
-           LCD.printNumI( tm_correction,8*6,1*8,2,' ');
-           LCD.printNumI(errors,RIGHT,1*8,2,' ');
            
            early = late = secs  = 0;   // reset the stats for the next minute
            secs += save_phase_hist(phase,errors);
+           perrors = errors;
            errors = 0;
-           LCD.printNumF( (float)tot_phase/(float)NUM_HISTORY,2,RIGHT,4*8,'.',6,' ' );
-           LCD.printNumI( (int)rtotal,LEFT,4*8,5,' ' );
-           LCD.printNumI( max_loops, RIGHT,5*8,3,' ' );
            phase = 0;       
            if( wwvb_errors > 0 ) keep_time();
         }
-
+        psec = secs;
       }  // end decode time    
     }    // end integration timer
   }      // loops - repeat for lost milliseconds if any
 }
 
 
+void psecs(){
+    // remove some work from wwvb_sample2();
+
+        LCD.setFont(MediumNumbers);
+        LCD.printNumI(psec,RIGHT,2*8,2,'0');
+        LCD.setFont(SmallFont);
+        psec = -1;
+}
+
 // save correction history, adjust seconds if think lost one
 int8_t save_phase_hist(int phase, int errors){
 int i;
 
-   if( errors < 45 ){                           // assume in phase if receiving some good data, save expected data
+   if( errors < 11 ){                           // assume in phase if receiving some good data, save expected data
       tot_phase = phase;
       for( i = 0; i < NUM_HISTORY-1; ++i ){
          phase_history[i] = phase_history[i+1];
@@ -415,7 +461,6 @@ uint16_t val;
 
 void keep_time(){
 
-   
    if( ++gmin >= 60 ){
       gmin = 0;
       if( ++ghr >= 24 ){
@@ -433,18 +478,6 @@ void keep_time(){
    //p_fill( gmin,2 );
    //Serial.println();
    
-   LCD.setFont(MediumNumbers);
-   LCD.printNumI(ghr,LEFT,2*8,2,'0');
-   LCD.printNumI(gmin,CENTER,2*8,2,'0');
-   LCD.setFont(SmallFont);
-   LCD.printNumI(gmon,0,5*8,2,'0');
-   LCD.print("/",2*6,5*8);
-   LCD.printNumI(gday,3*6,5*8,2,'0');
-   LCD.print("/",5*6,5*8);
-   LCD.printNumI(gyr,6*6,5*8,2,'0');
-   
-
-
 }
 
 /***
