@@ -18,32 +18,25 @@ extern uint8_t BigNumbers[];
 int gmon = 1,gday = 1,gyr = 1,ghr,gmin;
 int tot_days = 1;
 uint16_t leap = 1;
-uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 uint8_t DST;                         // daylight savings bit
 uint8_t gsec;
 uint8_t msg_que = 1;
-unsigned long old_t;
+uint64_t wwvb_data, wwvb_sync, wwvb_errors;
 
 // long term time adjustment
-long time_adjust;                  // counter
-long tm_correct_count = 6000;      // adjust one ms in this many ms
+uint16_t time_adjust;                  // counter
+uint16_t tm_correct_count = 3000;  // test if really fast clock  //50000;      // adjust one ms in this many ms
 int8_t tm_correction = 1;          // +1 fast,  -1 slow
 
-// short term lost second detection( when wwvb signal is weak )
-#define NUM_HISTORY 32
+// lost second detection when wwvb signal is weak
 int phase;
 int tot_phase;
-int phase_history[NUM_HISTORY];
-float rtotal;
 
-int psec;                            // que prints outside of the timekeeping function
+volatile int psec;                   // que prints outside of the timekeeping function
 uint8_t pmin;
-uint8_t errors;
 uint8_t perrors;
-int max_loops;
+int pwwvb_tmp;
 
-char stg_buf[128];                   // expand the serial buffer
-int stin, stout;
 
 void setup() {
 int i;  
@@ -55,16 +48,24 @@ int i;
   LCD.print("WWVB PPS TEST",CENTER,8*0);
   delay( 5000 );
   LCD.clrRow(0);
-  old_t = millis();
 
+  // timer0 millis timer
+  OCR0A = 0x40;
+  TIMSK0 |= _BV(OCIE0A);
+
+}
+
+
+ISR(TIMER0_COMPA_vect){        // millis timer interrupt
+
+   wwvb_sample2();
+  
 }
 
 void loop() {
 static uint8_t msg;
 
-  wwvb_sample2(millis());
-
-  while( stin != stout && Serial.availableForWrite() > 4 ) serial_unstage();
+  if( pwwvb_tmp != -1 ) pbin( );
 
   if( gsec == msg_que && Serial.availableForWrite() > 60 ){      // send all each second
      switch( msg ){
@@ -76,23 +77,21 @@ static uint8_t msg;
                 if( msg_que >= 60 ) msg_que = 0;
                 msg = 0;
                 break;
-     }
-    
+     }    
   }
 
   if( psec != -1 ) psecs();
-  else if( pmin ){
+  
+  if( pmin ){
      switch( pmin++ ){
-       case 1: 
+       case 1:
+           keep_time(); 
            LCD.printNumI( tm_correct_count,LEFT,1*8,6,' ');
            LCD.printNumI( tm_correction,8*6,1*8,2,' ');
            LCD.printNumI(perrors,RIGHT,1*8,2,' ');
        break;
        case 2:
-           LCD.printNumF( (float)tot_phase/(float)NUM_HISTORY,2,RIGHT,4*8,'.',6,' ' );
-           LCD.printNumI( (int)rtotal,LEFT,4*8,5,' ' );
-           LCD.printNumI( max_loops, RIGHT,5*8,3,' ' );
-           --max_loops;
+           LCD.printNumI( tot_phase,RIGHT,5*8,4,' ' );
        break;
        case 3:
            LCD.setFont(MediumNumbers);
@@ -156,7 +155,7 @@ void send_rmc(){
 
   gps_puts( "$GPRMC," );
   send_num( ghr ); send_num( gmin ); send_num( gsec );
-   gps_puts( ".20," );
+   gps_puts( ".20," );                // some references say this is needed, others say not needed
   gps_puts( "A," );
   gps_puts( "4426.8053,N,");        // lat
   gps_puts( "06931.4612,W,");       // long
@@ -180,10 +179,10 @@ static uint8_t  crc;
    if( c == '$' ) crc = 0;
    else if( c != '*' ) crc ^= c;
    
-   serial_stage( c );
+   Serial.write( c );
    if( c == '*' ){
       send_hex( crc );
-      serial_stage('\r'); serial_stage('\n');
+      Serial.println();
    }
    
 }
@@ -204,21 +203,9 @@ char buf[30];
       buf[1] = buf[0];
       buf[0] = '0';
    }
-   serial_stage(buf[0]);  serial_stage(buf[1]);
+   Serial.write(buf[0]);  Serial.write(buf[1]);
 }
 
-
-void serial_stage( char c ){
-
-    stg_buf[stin++] = c;
-    stin &= 127;
-}
-
-void serial_unstage(){
-
-   Serial.write( stg_buf[stout++] );
-   stout &= 127;
-}
 
 
 void calc_date(){    // from total days and leap flag
@@ -247,26 +234,30 @@ int i,d;
 // much like software sampling rs232 start and stop bits.
 // this routine runs fast by design until it locks on the wwvb signal( or slow depending upon point of view )
 
-void wwvb_sample2(unsigned long t){
-int loops;
+void wwvb_sample2(){
 uint8_t b,s,e;
 static uint8_t wwvb_clk, wwvb_sum, wwvb_tmp, wwvb_count;  // data decoding
 const uint8_t counts[8] = { 100,100,150,150,150,150,100,100 };  // total of 1000 ms
-static uint8_t secs,early,late;
+static uint8_t early,late;
+static int8_t secs;
 static uint8_t dither = 4;              // quick sync, adjusts to 1 when signal is good
-char ch[2];
+static uint8_t errors;
+static uint8_t fract;
 
 
-   loops = t - old_t;
-   old_t = t;
-   if( loops > max_loops ) max_loops = loops;
-   
-  while( loops-- ){   // repeat for any missed milliseconds
-
-    // adjust for 16mhz millis() error
-    if( ++time_adjust >= tm_correct_count && wwvb_clk > 100 ){
+    // adjust for 16mhz freq error, add or sub one millisecond
+    if( ++time_adjust >= tm_correct_count && wwvb_clk > 50 ){
         time_adjust -= tm_correct_count;
         wwvb_clk += tm_correction;
+    }
+
+    // duplicate the timer 0 - millis adjustment as we don't see it now as a timer0 interrupt
+    // timer 0 runs at 1.024 millisecond per interrupt
+    fract += 3;
+    if( fract >= 125 && wwvb_clk > 3 ){
+       --wwvb_clk;
+       ++time_adjust;
+       fract -= 125;
     }
 
 
@@ -279,58 +270,43 @@ char ch[2];
       wwvb_tmp |= b;
       wwvb_sum = 0;
 
-      // 8 dumps of the integrator is one second, decode this bit
       wwvb_count++;
       wwvb_count &= 7;
-      if( wwvb_count == 1 ){
-        digitalWrite( PPS_OUT,HIGH);     // pps not accurate rising edge to falling, use 00 10 for calibrate in U3S
-      }
-      if( wwvb_count == 2 ){
-        digitalWrite( PPS_OUT,LOW);
-        gsec = secs;     // que serial messages
-      }
+      if( wwvb_count == 1 ) digitalWrite( PPS_OUT,HIGH);                  // pps not accurate, use 00 10 for calibrate in U3S
+      if( wwvb_count == 2 ) digitalWrite( PPS_OUT,LOW) , gsec = secs;     // que serial messages
 
       wwvb_clk = counts[wwvb_count];  // 100 100 150 150 150 150 100 100
                               // decode     0       1      sync    stop should be high
-      if( wwvb_count == 0 ){    // decode time
+      // 8 dumps of the integrator is one second, decode this bit
+      if( wwvb_count == 0 ){    // start of next second, decode time
 
         // clocks late or early, just dither them back and forth across the falling edge
-        // when not in sync, more 1's than 0's are detected and this slips in time.
-        
-      if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
-
-         if( digitalRead(WWVB_IN) == 0 ){  
-            ++late;                                // sampling late
-            wwvb_clk -= dither;                 // adjust sample to earlier
-         }
-         else{
-            ++early;                               // need to sample later     
-            wwvb_clk +=  dither;                   // longer clock            
-         }
-      }
+        // when not in sync, more 1's than 0's are detected and this slips in time.       
+        if( wwvb_tmp != 0xff  && wwvb_tmp != 0x00  ){
+           if( digitalRead(WWVB_IN) == 0 ){  
+             ++late;                                // sampling late
+             wwvb_clk -= dither;                 // adjust sample to earlier
+           }
+           else{
+             ++early;                               // need to sample later     
+             wwvb_clk +=  dither;                   // longer clock            
+           }
+        }
       
         // decode
         // 11111100 is a zero,  11110000 is a one, 11000000 is a sync      
         b = 0;  s = 0;  e = 1;   // assume it is an error
-        pbin( wwvb_tmp );
-        // strict decode 
         if( wwvb_tmp == 0xfc  ) e = 0, b = 0;
         if( wwvb_tmp == 0xf0  ) e = 0, b = 1;
         if( wwvb_tmp == 0xc0  ) e = 0, s = 1;
-
-        ch[0] = 'e';   ch[1] = 0;
-        if( e == 0 ){
-           if( s == 1 ) ch[0] = 'S';
-           else if( b == 1 ) ch[0] = '1';
-           else ch[0] = '0';
-        }
-        LCD.print(ch,LEFT,0);
 
         if( e ) ++errors;
         
         wwvb_data <<= 1;   wwvb_data |= b;    // shift 64 bits data
         wwvb_sync <<= 1;   wwvb_sync |= s;    // sync
         wwvb_errors <<= 1; wwvb_errors |= e;  // errors
+
+        pwwvb_tmp = wwvb_tmp;
 
         // magic 64 bits of sync  ( looking at 60 seconds of data with 4 seconds of the past minute )
         // xxxx1000000001 0000000001 0000000001 0000000001 0000000001 0000000001
@@ -340,73 +316,68 @@ char ch[2];
         if( wwvb_sync == 0b0001100000000100000000010000000001000000000100000000010000000001 ){
           if( wwvb_errors == 0 ){    // decode if no bit errors
              wwvb_decode();
-             secs = 59;              // secs = 0 next statement
+             secs = 59;              // secs incremented below
           }
         }
         
         if( ++secs >= 60 ){  //  adjust dither each minute
+           secs -= 60;
            dither = ( errors >> 4 ) + 1;
            pmin = 1;                          // que prints
            phase = early-late;
-
-           if( errors < 30 ){
+           
+           if( errors <= 10 ){                // a signal with accurate timing, adjust the clock adjustment
            // will this work for both slow and fast 16 mhz clock?
            // adjust correction for the 16 mhz nano clock
               tm_correct_count += tm_correction * (late - early);  // ? which is correct ?
               //tm_correct_count += tm_correction * (early - late);
               if( tm_correct_count > 60000 ){
                  tm_correct_count =  59000;
-                 tm_correction *= -1;
+                 tm_correction *= -1;                     // slow or fast correction
               }
            }
            
-           //Serial.print( errors );  Serial.write(' ');
-           //Serial.print( tm_correction); Serial.write(' ');
-           //Serial.println( tm_correct_count );
-           
-           early = late = secs  = 0;   // reset the stats for the next minute
+           early = late  = 0;   // reset the stats for the next minute
            secs += save_phase_hist(phase,errors);
            perrors = errors;
            errors = 0;
            phase = 0;       
-           if( wwvb_errors > 0 ) keep_time();
         }
         psec = secs;
       }  // end decode time    
     }    // end integration timer
-  }      // loops - repeat for lost milliseconds if any
 }
 
 
 void psecs(){
-    // remove some work from wwvb_sample2();
-
-        LCD.setFont(MediumNumbers);
-        LCD.printNumI(psec,RIGHT,2*8,2,'0');
-        LCD.setFont(SmallFont);
-        psec = -1;
+int ps;
+    noInterrupts();
+      ps = psec;
+      psec = -1;
+    interrupts();  
+    
+    LCD.setFont(MediumNumbers);
+    LCD.printNumI(ps,RIGHT,2*8,2,'0');
+    LCD.setFont(SmallFont);
 }
 
 // save correction history, adjust seconds if think lost one
 int8_t save_phase_hist(int phase, int errors){
 int i;
 
-   if( errors < 11 ){                           // assume in phase if receiving some good data, save expected data
-      tot_phase = phase;
-      for( i = 0; i < NUM_HISTORY-1; ++i ){
-         phase_history[i] = phase_history[i+1];
-         tot_phase += phase_history[i];
-      }
-      phase_history[NUM_HISTORY-1] = phase;
-      rtotal = 0.0;
+   if( errors <= 40 ){                           // assume in phase if receiving some good data
+      if( tot_phase < 0 ) ++tot_phase;
+      if( tot_phase > 0 ) --tot_phase;
    }
-   else{
-      rtotal -= (float)tot_phase / (float)NUM_HISTORY;       // sub expected
-      rtotal += phase;                         // add new
-      if( rtotal > 1000.0 ){
-        rtotal -= 1000.0;
-        return 1;                              // lost a second?
-      }
+
+   tot_phase += phase;
+   if( tot_phase > 600 ){
+     tot_phase -= 1000;
+     return 1;                              // lost a second?
+   }
+   if( tot_phase < -600 ){                  // gained a second
+     tot_phase += 1000;
+     return -1;
    }
 
    return 0;
@@ -436,8 +407,6 @@ uint8_t i;
   gyr = yr;
   tot_days = dy;
   calc_date();
-  keep_time();            // wwvb sends minute just ended info, so increment
-
 }
 
 // wwvb fields all decode about the same way
@@ -467,37 +436,32 @@ void keep_time(){
          ghr = 0;
          ++tot_days;
          if( tot_days > 365 + leap ) ++gyr, tot_days = 1;
+         noInterrupts();
          calc_date();
+         interrupts();
       }
    }
-
-   //p_fill( gmon,2 );  Serial.write('/');
-   //p_fill( gday,2 );  Serial.write('/');
-   //Serial.print("20");  p_fill(gyr,2);  Serial.write(' '); Serial.write(' ');
-   //p_fill( ghr,2);  Serial.write(':');
-   //p_fill( gmin,2 );
-   //Serial.println();
    
 }
 
-/***
-void p_fill( int val, int digits ){     // zero fill printing
 
-   if( digits >= 4 && val < 1000 ) Serial.write('0');
-   if( digits >= 3 && val < 100 ) Serial.write('0');
-   if( digits >= 2 && val < 10 ) Serial.write('0');
-   Serial.print(val);
-}
-***/
+void pbin( ){
+int v;
+char buf[30];
+char ch[2];
 
-void pbin( uint8_t val ){
-int i;
-uint8_t v;
 
-   for( i = 7; i >=0; --i ){
-      v = 0;
-      if( val & _BV(i)) v = 1;
-      LCD.printNumI( v, 78-6*i, 0*8);
-   }
-  
+   noInterrupts();
+    ch[0] = 'e';
+    if( pwwvb_tmp == 0xc0 ) ch[0] = 'S';
+    if( pwwvb_tmp == 0xf0 ) ch[0] = '1';
+    if( pwwvb_tmp == 0xfc ) ch[0] = '0';
+    ch[1] = 0;
+    v = pwwvb_tmp + 256;             // add a leading 1 
+    pwwvb_tmp = -1;
+   interrupts();
+
+  LCD.print( ch, LEFT,0*8 );
+  itoa( v,buf,2 );
+  LCD.print(&buf[1],RIGHT,0*8);      // remove leading 1
 }
